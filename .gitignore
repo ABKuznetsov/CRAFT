@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+build/
+dist/
+*.egg-info/
+.DS_Store
+
+# Development-only material is kept locally, not in the public application repo.
+tests/
+examples/
+docs/superpowers/
+tools/smoke_*.py
+
+# User and test structure data.
+*.cif
+*.res
+*.ins
+*.pdb
+*.xyz
+*.vasp
+POSCAR*
+*.xpff
