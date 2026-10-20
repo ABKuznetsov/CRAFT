@@ -160,6 +160,20 @@ def application_style() -> str:
     }}
     QTreeWidget::item:selected {{
         background: #dcecfb;
+        color: {c["text"]};
+    }}
+    QTreeView::indicator, QTableView::indicator {{
+        width: 16px;
+        height: 16px;
+        border: 1px solid {c["border"]};
+        border-radius: 4px;
+        background: {c["panel"]};
+        image: none;
+    }}
+    QTreeView::indicator:checked, QTableView::indicator:checked {{
+        background: #087cc8;
+        border-color: #087cc8;
+        image: url("{checkmark}");
     }}
     QHeaderView::section {{
         background: {c["panel_alt"]};

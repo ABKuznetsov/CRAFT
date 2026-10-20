@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Literal
 
-from craft.analysis.reporting.model import Availability, StructureReport
+from craft.analysis.reporting.model import Availability, ReportTable, StructureReport
 
 
 class FigureKind(StrEnum):
@@ -50,6 +50,11 @@ class SceneManifest:
     show_legend: bool
     visual_settings: tuple[tuple[str, object], ...] = ()
     diagnostics: tuple[str, ...] = ()
+    visual_state: tuple[tuple[str, object], ...] = ()
+    scene_bounds: tuple[tuple[float, float], ...] = ()
+    scene_settings: tuple[tuple[str, bool], ...] = ()
+    scene_kind: str = "structure"
+    scene_object_ref: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "visible_object_refs", tuple(self.visible_object_refs))
@@ -61,6 +66,19 @@ class SceneManifest:
             tuple((str(key), value) for key, value in self.visual_settings),
         )
         object.__setattr__(self, "diagnostics", tuple(map(str, self.diagnostics)))
+        object.__setattr__(self, "visual_state", tuple(self.visual_state))
+        object.__setattr__(self, "scene_bounds", tuple(tuple(pair) for pair in self.scene_bounds))
+
+
+@dataclass(frozen=True, slots=True)
+class FigureNarrative:
+    """Frozen, evidence-based prose about the captured subjects; no numbering."""
+
+    role: str
+    subject_refs: tuple[str, ...]
+    statements: tuple[str, ...]
+    table_ids: tuple[str, ...] = ()
+    diagnostics: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +92,8 @@ class ReportFigure:
     preview_png: bytes
     include: bool = True
     stale: bool = False
+    narrative: FigureNarrative | None = None
+    description: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "preview_png", bytes(self.preview_png))
@@ -125,14 +145,14 @@ class ReportDraft:
     figures: tuple[ReportFigure, ...] = ()
     references: tuple[ReportReference, ...] = ()
     recommendation_applied: bool = False
+    suppressed_table_ids: tuple[str, ...] = ()
+    table_row_inclusion: tuple[tuple[str, tuple[tuple[str, bool], ...]], ...] = ()
 
     def __post_init__(self) -> None:
         available = tuple(dict.fromkeys(str(item) for item in self.available_table_ids))
-        selected = tuple(
-            item
-            for item in dict.fromkeys(str(item) for item in self.selected_table_ids)
-            if item in available
-        )
+        # Availability can change during reanalysis. Keep the author's choices
+        # and numbering; the renderer shows a reason for unavailable tables.
+        selected = tuple(dict.fromkeys(str(item) for item in self.selected_table_ids))
         figures_by_id = {figure.id: figure for figure in self.figures}
         if len(figures_by_id) != len(self.figures):
             raise ValueError("Report figure IDs must be unique.")
@@ -140,9 +160,40 @@ class ReportDraft:
         object.__setattr__(self, "selected_table_ids", selected)
         object.__setattr__(self, "figures", tuple(self.figures))
         object.__setattr__(self, "references", tuple(self.references))
+        row_inclusion = {}
+        for table_id, overrides in self.table_row_inclusion:
+            states = {}
+            for row_id, included in overrides:
+                if not isinstance(included, bool):
+                    raise ValueError("Report row inclusion must be a boolean.")
+                states[str(row_id)] = included
+            if states:
+                row_inclusion[str(table_id)] = tuple(sorted(states.items()))
+        object.__setattr__(self, "table_row_inclusion", tuple(sorted(row_inclusion.items())))
+
+    def with_table_rows(self, table_id: str, overrides: tuple[tuple[str, bool], ...]) -> ReportDraft:
+        states = dict(self.table_row_inclusion)
+        if overrides:
+            states[table_id] = overrides
+        else:
+            states.pop(table_id, None)
+        return replace(self, table_row_inclusion=tuple(states.items()))
+
+    def publication_table(self, table: ReportTable) -> ReportTable:
+        """Apply saved row choices to a display copy of the scientific table."""
+        overrides = dict(dict(self.table_row_inclusion).get(table.id, ()))
+        if not overrides:
+            return table
+        return replace(table, rows=tuple(
+            replace(row, include_in_publication=overrides[row.id]) if row.id in overrides else row
+            for row in table.rows
+        ))
 
     def with_tables(self, table_ids: tuple[str, ...]) -> ReportDraft:
-        return replace(self, selected_table_ids=tuple(table_ids))
+        allowed = set(self.available_table_ids) | set(self.selected_table_ids)
+        table_ids = tuple(key for key in table_ids if key in allowed)
+        suppressed = (set(self.suppressed_table_ids) | (set(self.selected_table_ids) - set(table_ids))) - set(table_ids)
+        return replace(self, selected_table_ids=tuple(table_ids), suppressed_table_ids=tuple(sorted(suppressed)))
 
     def with_figure(self, figure: ReportFigure) -> ReportDraft:
         figures = list(self.figures)
@@ -185,12 +236,9 @@ def numbered_tables(draft: ReportDraft) -> tuple[NumberedItem, ...]:
 
 
 def numbered_figures(draft: ReportDraft) -> tuple[NumberedItem, ...]:
+    from craft.analysis.reporting.automatic import composed_figures
     return tuple(
-        NumberedItem(figure.id, number)
-        for number, figure in enumerate(
-            (item for item in draft.figures if item.include),
-            start=1,
-        )
+        NumberedItem(group.panels[0].id, group.number) for group in composed_figures(draft)
     )
 
 
@@ -222,14 +270,10 @@ def resolve_reference(
             True,
         )
 
-    number = next(
-        (
-            item.number
-            for item in numbered_figures(draft)
-            if item.target_id == reference.target_id
-        ),
-        None,
-    )
+    from craft.analysis.reporting.automatic import composed_figures
+    group = next((group for group in composed_figures(draft)
+                  if any(panel.id == reference.target_id for panel in group.panels)), None)
+    number = group.number if group is not None else None
     if number is None:
         return ResolvedReference(
             reference.kind,
@@ -251,6 +295,9 @@ def resolve_reference(
         label = f"Figure {number}{panel}"
     else:
         label = f"Figure {number}"
+        if group is not None and len(group.panels) > 1:
+            index = next(i for i, panel in enumerate(group.panels) if panel.id == reference.target_id)
+            label += chr(ord("a") + index)
     return ResolvedReference(
         reference.kind,
         reference.target_id,
@@ -306,10 +353,12 @@ def recommend_report_content(
 ) -> ReportRecommendation:
     """Select present report capabilities without deriving new science."""
 
+    from craft.analysis.reporting.catalog import ARTICLE_TABLE_IDS
+
     table_ids = tuple(
         table_id
         for table_id, table in report.tables.items()
-        if table.availability is Availability.AVAILABLE
+        if table_id in ARTICLE_TABLE_IDS and table.availability is Availability.AVAILABLE and table.rows
     )
     figures = [
         FigureRecommendation(

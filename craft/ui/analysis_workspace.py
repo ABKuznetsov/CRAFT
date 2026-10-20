@@ -5,6 +5,7 @@ from dataclasses import replace
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
+    QCheckBox,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTableView,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -39,6 +41,8 @@ class AnalysisWorkspace(QWidget):
     object_refs_selected = Signal(tuple)
     export_csv_requested = Signal(str)
     export_json_requested = Signal()
+    export_html_requested = Signal()
+    export_docx_requested = Signal()
     draft_changed = Signal(object)
     snapshot_requested = Signal()
     standard_overview_requested = Signal(str)
@@ -54,13 +58,13 @@ class AnalysisWorkspace(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         self.sections = QTabWidget()
-        root.addWidget(self.sections)
+        self.sections.tabBar().hide()
         splitter = QSplitter()
-        self.sections.addTab(splitter, "Tables")
+        root.addWidget(splitter, 1)
 
         catalogue_panel = QFrame()
         catalogue_layout = QVBoxLayout(catalogue_panel)
-        title = QLabel("ANALYSIS CATALOGUE")
+        title = QLabel("REPORT CONTENTS")
         title.setObjectName("eyebrow")
         catalogue_layout.addWidget(title)
         self.preset_combo = QComboBox()
@@ -83,10 +87,14 @@ class AnalysisWorkspace(QWidget):
         )
         catalogue_layout.addWidget(self.recommendation_label)
         self.catalogue = QTreeWidget()
-        self.catalogue.setHeaderLabels(("Table", "State"))
+        self.catalogue.setHeaderLabels(("Content", "State"))
+        self.catalogue.setColumnWidth(0, 245)
         self.catalogue.currentItemChanged.connect(self._catalogue_changed)
         self.catalogue.itemChanged.connect(self._selection_changed)
         catalogue_layout.addWidget(self.catalogue, 1)
+        self.unavailable_check = QCheckBox("Show unavailable sections")
+        self.unavailable_check.toggled.connect(self._refresh_availability)
+        catalogue_layout.addWidget(self.unavailable_check)
         splitter.addWidget(catalogue_panel)
 
         centre = QFrame()
@@ -99,13 +107,12 @@ class AnalysisWorkspace(QWidget):
         self.table_view.setSortingEnabled(False)
         self.table_view.clicked.connect(self._row_selected)
         centre_layout.addWidget(self.table_view, 1)
-        splitter.addWidget(centre)
+        self.sections.addTab(centre, "Tables")
+        splitter.addWidget(self.sections)
 
         properties = QFrame()
         properties_layout = QVBoxLayout(properties)
-        heading = QLabel("TABLE PROPERTIES")
-        heading.setObjectName("eyebrow")
-        properties_layout.addWidget(heading)
+        properties_layout.setContentsMargins(0, 0, 0, 0)
         form = QFormLayout()
         self.availability_label = QLabel("—")
         self.method_label = QLabel("—")
@@ -120,11 +127,19 @@ class AnalysisWorkspace(QWidget):
         self.json_button = QPushButton("Export report as JSON…")
         self.csv_button.clicked.connect(self._request_csv)
         self.json_button.clicked.connect(self.export_json_requested)
-        properties_layout.addWidget(self.csv_button)
-        properties_layout.addWidget(self.json_button)
-        properties_layout.addStretch()
-        splitter.addWidget(properties)
-        splitter.setSizes((260, 760, 280))
+        self.properties_button = QToolButton()
+        self.properties_button.setText("Method and warnings")
+        self.properties_button.setCheckable(True)
+        self.properties_button.toggled.connect(properties.setVisible)
+        properties.hide()
+        table_actions = QHBoxLayout()
+        table_actions.addWidget(self.properties_button)
+        table_actions.addStretch()
+        table_actions.addWidget(self.csv_button)
+        centre_layout.insertLayout(1, table_actions)
+        centre_layout.insertWidget(2, properties)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes((350, 1000))
         self.select_all_button.clicked.connect(self._select_all)
         self.select_none_button.clicked.connect(self._select_none)
         self.recommended_button.clicked.connect(self._apply_recommendation)
@@ -133,7 +148,7 @@ class AnalysisWorkspace(QWidget):
         figures_page = QWidget()
         figures_layout = QVBoxLayout(figures_page)
         figure_actions = QHBoxLayout()
-        self.snapshot_button = QPushButton("Snapshot for report")
+        self.snapshot_button = QPushButton("Add view to report")
         self.atom_overview_button = QPushButton("Standard overview · atom labels")
         self.polyhedron_overview_button = QPushButton(
             "Standard overview · polyhedron labels"
@@ -151,9 +166,9 @@ class AnalysisWorkspace(QWidget):
         ):
             figure_actions.addWidget(button)
         figures_layout.addLayout(figure_actions)
-        self.figure_table = QTableWidget(0, 5)
+        self.figure_table = QTableWidget(0, 6)
         self.figure_table.setHorizontalHeaderLabels(
-            ("Include", "Title", "Caption", "Kind", "State")
+            ("Include", "Title", "Caption", "Kind", "State", "Description")
         )
         self.figure_table.horizontalHeader().setStretchLastSection(True)
         self.figure_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -162,8 +177,22 @@ class AnalysisWorkspace(QWidget):
         self.sections.addTab(figures_page, "Figures")
 
         self.preview = ReportPreview()
+        self.preview.list.hide()
         self.preview.target_requested.connect(self._preview_target_requested)
-        self.sections.addTab(self.preview, "Preview")
+        preview_page = QWidget()
+        preview_layout = QVBoxLayout(preview_page)
+        self.html_button = QPushButton("Export HTML…")
+        self.html_button.clicked.connect(self.export_html_requested)
+        self.docx_button = QPushButton("Export Word (.docx)…")
+        self.docx_button.clicked.connect(self.export_docx_requested)
+        preview_layout.addWidget(self.preview, 1)
+        self.sections.addTab(preview_page, "Preview")
+        export_actions = QHBoxLayout()
+        export_actions.addStretch()
+        export_actions.addWidget(self.json_button)
+        export_actions.addWidget(self.html_button)
+        export_actions.addWidget(self.docx_button)
+        root.insertLayout(0, export_actions)
         self.snapshot_button.clicked.connect(self.snapshot_requested)
         self.atom_overview_button.clicked.connect(
             lambda: self.standard_overview_requested.emit("atom-orbits")
@@ -174,6 +203,38 @@ class AnalysisWorkspace(QWidget):
         self.figure_up_button.clicked.connect(lambda: self._move_figure(-1))
         self.figure_down_button.clicked.connect(lambda: self._move_figure(1))
         self.figure_remove_button.clicked.connect(self._remove_figure)
+        self.clear_report()
+
+    def _clear_table_models(self) -> None:
+        self.table_view.setModel(None)
+        for model in self._models.values():
+            model.deleteLater()
+        self._models.clear()
+
+    def _set_report_actions_enabled(self, enabled: bool) -> None:
+        for button in (self.json_button, self.html_button, self.docx_button, self.snapshot_button,
+                       self.atom_overview_button, self.polyhedron_overview_button,
+                       self.select_all_button, self.select_none_button):
+            button.setEnabled(enabled)
+
+    def clear_report(self) -> None:
+        """Drop document-owned report content before a new document or analysis."""
+        self.report = None
+        self.draft = None
+        self.recommendation = None
+        self._clear_table_models()
+        self.catalogue.clear()
+        self._section_items = {}
+        self.figure_table.setRowCount(0)
+        self.preview.list.clear()
+        self.preview.content.clear()
+        for label in (self.table_title, self.availability_label, self.method_label, self.warning_label):
+            label.clear()
+        self.recommendation_label.setText("No recommendation prepared")
+        self.recommendation_label.setToolTip("")
+        self.recommended_button.setEnabled(False)
+        self.csv_button.setEnabled(False)
+        self._set_report_actions_enabled(False)
 
     def set_report(
         self,
@@ -190,9 +251,20 @@ class AnalysisWorkspace(QWidget):
             structure_fingerprint="",
             available_table_ids=available,
         )
-        self._models.clear()
+        self.recommendation = None
+        self.recommended_button.setEnabled(False)
+        self.recommendation_label.setText("No recommendation prepared")
+        self.recommendation_label.setToolTip("")
+        self._clear_table_models()
+        self._set_report_actions_enabled(True)
         self._updating_selection = True
         self.catalogue.clear()
+        self._section_items = {}
+        for section, title in (("preview", "Description / document"), ("tables", "Tables"), ("figures", "Figures")):
+            item = QTreeWidgetItem((title, ""))
+            item.setData(0, Qt.ItemDataRole.UserRole, "@" + section)
+            self.catalogue.addTopLevelItem(item)
+            self._section_items[section] = item
         groups: dict[str, QTreeWidgetItem] = {}
         first_available: QTreeWidgetItem | None = None
         for definition in TABLE_DEFINITIONS:
@@ -200,22 +272,21 @@ class AnalysisWorkspace(QWidget):
             if group is None:
                 group = QTreeWidgetItem((definition.group, ""))
                 groups[definition.group] = group
-                self.catalogue.addTopLevelItem(group)
+                self._section_items["tables"].addChild(group)
             table = report.tables.get(definition.id)
-            available = table is not None and table.availability is Availability.AVAILABLE
-            state = "Available" if available else f"Stage {definition.stage}"
+            available = table is not None and table.availability is Availability.AVAILABLE and bool(table.rows)
+            state = "Available" if available else "No data"
             item = QTreeWidgetItem((definition.title, state))
+            item.setToolTip(0, definition.title)
             item.setData(0, Qt.ItemDataRole.UserRole, definition.id)
+            item.setCheckState(
+                0, Qt.CheckState.Checked if definition.id in self.draft.selected_table_ids else Qt.CheckState.Unchecked,
+            )
             if available:
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(
-                    0,
-                    Qt.CheckState.Checked
-                    if definition.id in self.draft.selected_table_ids
-                    else Qt.CheckState.Unchecked,
-                )
             else:
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+                item.setFlags(item.flags() & ~(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable))
+                item.setToolTip(0, table.unavailable_reason if table is not None else "No data available")
             group.addChild(item)
             if available and first_available is None:
                 first_available = item
@@ -225,11 +296,33 @@ class AnalysisWorkspace(QWidget):
             self.catalogue.setCurrentItem(first_available)
         self._refresh_figures()
         self.preview.set_draft(self.draft, self.report)
+        self._refresh_availability()
+        self.select_section("preview")
+
+    def _refresh_availability(self) -> None:
+        if self.report is None:
+            return
+        show_all = self.unavailable_check.isChecked()
+        self.catalogue.setColumnHidden(1, not show_all)
+        selected = self.draft.selected_table_ids if self.draft is not None else ()
+        for item in self._table_items():
+            table_id = item.data(0, Qt.ItemDataRole.UserRole)
+            table = self.report.tables.get(table_id)
+            available = table is not None and table.availability is Availability.AVAILABLE and bool(table.rows)
+            item.setHidden(not (show_all or available or table_id in selected))
+        tables = self._section_items.get("tables")
+        if tables is not None:
+            for index in range(tables.childCount()):
+                group = tables.child(index)
+                group.setHidden(all(group.child(i).isHidden() for i in range(group.childCount())))
 
     def select_section(self, section: str) -> None:
         mapping = {"tables": 0, "figures": 1, "text": 2, "preview": 2}
         if section in mapping:
             self.sections.setCurrentIndex(mapping[section])
+            item = self._section_items.get("preview" if section == "text" else section)
+            if item is not None and self.catalogue.currentItem() is not item:
+                self.catalogue.setCurrentItem(item)
 
     def _refresh_figures(self) -> None:
         self.figure_table.blockSignals(True)
@@ -254,6 +347,7 @@ class AnalysisWorkspace(QWidget):
                 state = QTableWidgetItem("Stale" if figure.stale else "Ready")
                 state.setFlags(state.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.figure_table.setItem(row, 4, state)
+                self.figure_table.setItem(row, 5, QTableWidgetItem(figure.description))
         self.figure_table.blockSignals(False)
 
     def _figure_changed(self, item: QTableWidgetItem) -> None:
@@ -266,6 +360,7 @@ class AnalysisWorkspace(QWidget):
             == Qt.CheckState.Checked,
             title=self.figure_table.item(item.row(), 1).text(),
             caption=self.figure_table.item(item.row(), 2).text(),
+            description=self.figure_table.item(item.row(), 5).text(),
         )
         self.draft = self.draft.with_figure(updated)
         self.preview.set_draft(self.draft, self.report)
@@ -320,19 +415,35 @@ class AnalysisWorkspace(QWidget):
         )
 
     def _table_items(self):
-        for group_index in range(self.catalogue.topLevelItemCount()):
-            group = self.catalogue.topLevelItem(group_index)
-            for child_index in range(group.childCount()):
-                yield group.child(child_index)
+        table_ids = {definition.id for definition in self.table_definitions}
+        def visit(item):
+            if item.data(0, Qt.ItemDataRole.UserRole) in table_ids:
+                yield item
+            for index in range(item.childCount()):
+                yield from visit(item.child(index))
+        for index in range(self.catalogue.topLevelItemCount()):
+            yield from visit(self.catalogue.topLevelItem(index))
 
     def _catalogue_changed(self, current, _previous) -> None:
         if current is None or self.report is None:
             return
         table_id = current.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(table_id, str) and table_id.startswith("@"):
+            self.select_section(table_id[1:])
+            return
         if not table_id or table_id not in self.report.tables:
             return
         table = self.report.tables[table_id]
-        model = self._models.setdefault(table_id, ReportTableModel(table, self))
+        self.sections.setCurrentIndex(0)
+        model = self._models.get(table_id)
+        if model is None:
+            display_table = self.draft.publication_table(table) if self.draft is not None else table
+            model = ReportTableModel(display_table, self)
+            self._models[table_id] = model
+            model.dataChanged.connect(
+                lambda _first, _last, roles, key=table_id, source=model:
+                    self._publication_rows_changed(key, source, roles)
+            )
         self.table_view.setModel(model)
         self.table_view.resizeColumnsToContents()
         self.table_title.setText(table.title)
@@ -340,6 +451,21 @@ class AnalysisWorkspace(QWidget):
         self.method_label.setText(table.method or table.unavailable_reason or "Source CIF")
         self.warning_label.setText("\n".join(w.message for w in table.warnings) or "None")
         self.csv_button.setEnabled(table.availability is Availability.AVAILABLE)
+
+    def _publication_rows_changed(self, table_id, model, roles) -> None:
+        if (self.draft is None or self.report is None or self._models.get(table_id) is not model
+                or roles and Qt.ItemDataRole.CheckStateRole not in roles):
+            return
+        defaults = {row.id: row.include_in_publication for row in self.report.tables[table_id].rows}
+        overrides = dict(dict(self.draft.table_row_inclusion).get(table_id, ()))
+        for row in model.rows:
+            if row.include_in_publication == defaults[row.id]:
+                overrides.pop(row.id, None)
+            else:
+                overrides[row.id] = row.include_in_publication
+        self.draft = self.draft.with_table_rows(table_id, tuple(overrides.items()))
+        self.preview.set_draft(self.draft, self.report)
+        self.draft_changed.emit(self.draft)
 
     def _row_selected(self, index) -> None:
         model = self.table_view.model()
@@ -363,12 +489,14 @@ class AnalysisWorkspace(QWidget):
         if self._updating_selection or self.draft is None:
             return
         self.draft = self.draft.with_tables(self.selected_table_ids())
+        self.preview.set_draft(self.draft, self.report)
         self.draft_changed.emit(self.draft)
 
     def _set_selected_ids(self, selected_ids) -> None:
         if self.draft is None:
             return
-        selected = set(selected_ids) & set(self.draft.available_table_ids)
+        selected_ids = tuple(dict.fromkeys(key for key in selected_ids if key in self.draft.available_table_ids))
+        selected = set(selected_ids)
         self._updating_selection = True
         try:
             for item in self._table_items():
@@ -382,7 +510,8 @@ class AnalysisWorkspace(QWidget):
                     )
         finally:
             self._updating_selection = False
-        self.draft = self.draft.with_tables(self.selected_table_ids())
+        self.draft = self.draft.with_tables(selected_ids)
+        self.preview.set_draft(self.draft, self.report)
         self.draft_changed.emit(self.draft)
 
     def set_table_selected(self, table_id: str, selected: bool) -> None:
@@ -411,9 +540,9 @@ class AnalysisWorkspace(QWidget):
         self.recommendation = recommendation
         self.recommendation_label.setText(
             f"Recommended: {len(recommendation.table_ids)} tables, "
-            f"{len(recommendation.figure_requests)} figures. "
-            + " ".join(recommendation.reasons)
+            f"{len(recommendation.figure_requests)} figures."
         )
+        self.recommendation_label.setToolTip("\n".join(recommendation.reasons))
         self.recommended_button.setEnabled(True)
 
     def _apply_recommendation(self) -> None:
@@ -435,12 +564,11 @@ class AnalysisWorkspace(QWidget):
 
     def selected_table_ids(self) -> tuple[str, ...]:
         selected: list[str] = []
-        for group_index in range(self.catalogue.topLevelItemCount()):
-            group = self.catalogue.topLevelItem(group_index)
-            for child_index in range(group.childCount()):
-                item = group.child(child_index)
-                if item.checkState(0) is Qt.CheckState.Checked:
-                    table_id = item.data(0, Qt.ItemDataRole.UserRole)
-                    if table_id:
-                        selected.append(str(table_id))
-        return tuple(selected)
+        for item in self._table_items():
+            if item.checkState(0) is Qt.CheckState.Checked:
+                selected.append(str(item.data(0, Qt.ItemDataRole.UserRole)))
+        if self.draft is None:
+            return tuple(selected)
+        represented = set(self.catalogue_table_ids())
+        retained = tuple(key for key in self.draft.selected_table_ids if key in selected or key not in represented)
+        return (*retained, *(key for key in selected if key not in retained))

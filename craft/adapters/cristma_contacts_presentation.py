@@ -12,6 +12,7 @@ from cristma.chemistry import (
 )
 from cristma.crystal_chemistry import (
     ContactAnalysisResult,
+    OrientationMode,
     ReferenceCell,
     ResolutionStatus,
     ShellRole,
@@ -22,7 +23,7 @@ _ZERO: Translation = (0, 0, 0)
 
 
 class ContactVisibilityClass(StrEnum):
-    """CRAFT presentation grouping sourced from CRiStMa priority evidence."""
+    """Display grouping from selected shells or undirected-network priority."""
 
     PRIMARY = "primary"
     SECONDARY = "secondary"
@@ -67,11 +68,18 @@ class ContactPresentation:
     diagnostics: tuple[object, ...]
 
 
-def _is_primary(contact) -> bool:
+def _is_primary(contact, selected_alternatives) -> bool:
+    # Materialized memberships include unselected shell alternatives. Grammar
+    # priority identifies a candidate interaction, not a resolved shell bond.
+    # Undirected networks have no coordination shells and retain their native
+    # grammar priority instead.
     return any(
-        item.role is ShellRole.PRIMARY for item in contact.shell_memberships
+        item.role is ShellRole.PRIMARY
+        and selected_alternatives.get(item.shell_orbit_id) == item.alternative_id
+        for item in contact.shell_memberships
     ) or any(
         item.grammar_priority is InteractionPriority.PRIMARY
+        and item.orientation_mode is OrientationMode.UNDIRECTED
         for item in contact.interpretations
     )
 
@@ -86,6 +94,10 @@ def project_contacts(resolution: ContactAnalysisResult) -> ContactPresentation:
         for item in resolution.pair_table.contact_orbits
     }
     contacts_by_orbit: dict[str, list[object]] = {}
+    selected_alternatives = {
+        shell.shell_orbit_id: shell.selected_alternative
+        for shell in resolution.coordination_shell_orbits if shell.selected is not None
+    }
     materialized = resolution.materialize_contacts(ReferenceCell())
     for contact in materialized:
         contacts_by_orbit.setdefault(contact.resolved_contact_orbit_id, []).append(contact)
@@ -98,7 +110,7 @@ def project_contacts(resolution: ContactAnalysisResult) -> ContactPresentation:
         geometry = geometry_by_id[orbit.geometry_orbit_id]
         classification = (
             ContactVisibilityClass.PRIMARY
-            if any(_is_primary(item) for item in orbit_contacts)
+            if any(_is_primary(item, selected_alternatives) for item in orbit_contacts)
             else ContactVisibilityClass.SECONDARY
         )
         rows.append(ContactOrbitRow(

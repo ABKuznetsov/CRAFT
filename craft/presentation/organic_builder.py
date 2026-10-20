@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from craft.core.scientific_cache import ORGANIC_RESULT_SLOTS
 from craft.presentation.organic import (
     CoordinationNodeView,
     IntermolecularContactView,
@@ -20,21 +21,6 @@ from craft.presentation.organic import (
 def _result(document, slot: str):
     wrapper = getattr(document.scientific, slot, None)
     return getattr(wrapper, "result", None)
-
-
-def _combined_diagnostics(*results: object | None) -> tuple[object, ...]:
-    answer: list[object] = []
-    seen: set[tuple[str, str]] = set()
-    for result in results:
-        for diagnostic in getattr(result, "diagnostics", ()) if result is not None else ():
-            key = (
-                str(getattr(diagnostic, "code", "")),
-                str(getattr(diagnostic, "message", diagnostic)),
-            )
-            if key not in seen:
-                seen.add(key)
-                answer.append(diagnostic)
-    return tuple(answer)
 
 
 def build_organic_presentation(document) -> OrganicPresentation:
@@ -216,7 +202,6 @@ def build_organic_presentation(document) -> OrganicPresentation:
             )
         )
 
-    results = (molecular, intermolecular, packing, precursor, sbu, net)
     return OrganicPresentation(
         stage=document.analysis_stage,
         components=components,
@@ -228,7 +213,7 @@ def build_organic_presentation(document) -> OrganicPresentation:
         sbus=sbus,
         net_vertices=net_vertices,
         net_edges=net_edges,
-        diagnostics=_combined_diagnostics(*results),
+        diagnostics=document.scientific.diagnostics(ORGANIC_RESULT_SLOTS),
         representations=tuple(representations),
     )
 

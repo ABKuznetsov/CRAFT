@@ -17,9 +17,7 @@ from craft.knowledge.resolve import ResolvedInterpretation
 class InterpretationPanel(QWidget):
     apply_requested = Signal(str)
     dismiss_requested = Signal(str)
-    save_requested = Signal(str)
     remove_requested = Signal()
-    confirm_bonds_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -50,6 +48,7 @@ class InterpretationPanel(QWidget):
 
         self.why_button = QToolButton(self)
         self.why_button.setText("Why this was identified")
+        self.why_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.why_button.setCheckable(True)
         self.why_button.setArrowType(Qt.ArrowType.RightArrow)
         layout.addWidget(self.why_button)
@@ -60,25 +59,11 @@ class InterpretationPanel(QWidget):
         )
         self.details_label.hide()
         layout.addWidget(self.details_label)
-
-        save_actions = QHBoxLayout()
-        self.save_local_button = QPushButton("Save for this structure", self)
-        self.save_reusable_button = QPushButton("Save for similar motifs", self)
-        self.confirm_bonds_button = QPushButton("Confirm bond changes", self)
-        save_actions.addWidget(self.save_local_button)
-        save_actions.addWidget(self.save_reusable_button)
-        save_actions.addWidget(self.confirm_bonds_button)
-        save_actions.addStretch(1)
-        layout.addLayout(save_actions)
+        layout.addStretch(1)
 
         self.apply_button.clicked.connect(self._apply)
         self.dismiss_button.clicked.connect(self._dismiss)
         self.remove_button.clicked.connect(self.remove_requested)
-        self.save_local_button.clicked.connect(lambda: self.save_requested.emit("local"))
-        self.save_reusable_button.clicked.connect(
-            lambda: self.save_requested.emit("reusable")
-        )
-        self.confirm_bonds_button.clicked.connect(self.confirm_bonds_requested)
         self.why_button.toggled.connect(self._toggle_details)
         self.set_automatic()
 
@@ -100,52 +85,47 @@ class InterpretationPanel(QWidget):
         self.apply_button.setVisible(visible)
         self.dismiss_button.setVisible(visible)
 
+    def _set_details(self, text: str) -> None:
+        self.details_label.setText(text)
+        self.why_button.setVisible(bool(text))
+        if not text:
+            self.why_button.setChecked(False)
+            self.details_label.hide()
+
     def set_automatic(self) -> None:
         self._preset_id = None
         self.status_label.setText("Automatic interpretation")
-        self.details_label.clear()
+        self._set_details("")
         self._proposal_actions(False)
         self.remove_button.hide()
-        self.save_local_button.show()
-        self.save_reusable_button.show()
-        self.confirm_bonds_button.hide()
 
     def set_proposal(self, proposal: PresetProposal) -> None:
         self._preset_id = proposal.preset_id
         self.status_label.setText(
             f"Recognized motif: {proposal.name}\nConfidence: high"
         )
-        self.details_label.setText(proposal.evidence.summary)
+        self._set_details(proposal.evidence.summary)
         self._proposal_actions(True)
         self.remove_button.hide()
-        self.save_local_button.hide()
-        self.save_reusable_button.hide()
-        self.confirm_bonds_button.hide()
 
     def set_no_reliable_suggestion(self) -> None:
         self._preset_id = None
         self.status_label.setText("The motif could not be identified reliably.")
-        self.details_label.clear()
+        self._set_details("")
         self._proposal_actions(False)
         self.remove_button.hide()
-        self.confirm_bonds_button.hide()
 
     def set_resolved(self, resolved: ResolvedInterpretation) -> None:
         self._preset_id = resolved.preset_id
         self.status_label.setText(
             f"{resolved.name}\nSource: {resolved.provenance}"
         )
-        self.details_label.setText(
+        self._set_details(
             f"Vocabulary: {resolved.vocabulary}\n"
             f"Polyhedra: {len(resolved.member_polyhedron_ids)}"
         )
         self._proposal_actions(False)
         self.remove_button.setVisible(resolved.provenance != "automatic")
-        self.save_local_button.show()
-        self.save_reusable_button.show()
-        # CRAFT is read-only: pending bond proposals remain provenance, not an
-        # operation that the viewer can commit to the scientific model.
-        self.confirm_bonds_button.hide()
 
 
 __all__ = ["InterpretationPanel"]

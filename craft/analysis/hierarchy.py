@@ -8,16 +8,6 @@ if TYPE_CHECKING:
     from craft.analysis.nomenclature import NomenclatureAssignment
     from craft.analysis.structural_domains import StructuralDomain
 
-ANION_ELEMENTS = frozenset({"O", "F", "Cl", "Br", "I", "S", "Se", "N"})
-
-INTERSTITIAL_ELEMENTS = frozenset({"Li", "Na", "K", "Rb", "Cs", "Ca", "Sr", "Ba"})
-
-
-def is_interstitial_polyhedron(polyhedron: "CoordinationPolyhedron") -> bool:
-    """Presentation predicate; the scientific role comes from CrIStMa."""
-    components = {item.strip() for item in polyhedron.center_element.split("/")}
-    return bool(components) and components <= INTERSTITIAL_ELEMENTS
-
 
 class HierarchyLevel(StrEnum):
     SITES = "sites"

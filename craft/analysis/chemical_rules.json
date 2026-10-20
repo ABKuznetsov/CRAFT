@@ -1,0 +1,441 @@
+{
+  "id": "craft.chemical_routes",
+  "version": "4",
+  "scope": "Explicit CRAFT calculator requests selected from the native CrIStMa classification; not a composition classifier.",
+  "migration_source": "Initial contact recipes migrated from CrIStMa 0.1.0b10 chemical_reference_v3_1; further changes belong to CRAFT.",
+  "interaction_elements": {
+    "alkali_metals": [
+      "Li",
+      "Na",
+      "K",
+      "Rb",
+      "Cs",
+      "Fr"
+    ],
+    "alkaline_earth_metals": [
+      "Be",
+      "Mg",
+      "Ca",
+      "Sr",
+      "Ba",
+      "Ra"
+    ],
+    "halogens": [
+      "F",
+      "Cl",
+      "Br",
+      "I",
+      "At"
+    ],
+    "chalcogens": [
+      "O",
+      "S",
+      "Se",
+      "Te",
+      "Po"
+    ],
+    "pnictogens": [
+      "P",
+      "As",
+      "Sb",
+      "Bi"
+    ],
+    "tetrels": [
+      "Si",
+      "Ge",
+      "Sn",
+      "Pb"
+    ],
+    "common_electropositive_zintl_cations": [
+      "Li",
+      "Na",
+      "K",
+      "Rb",
+      "Cs",
+      "Mg",
+      "Ca",
+      "Sr",
+      "Ba",
+      "Eu",
+      "Yb"
+    ],
+    "oxygen": [
+      "O"
+    ],
+    "carbon": [
+      "C"
+    ],
+    "covalent_carbide_formers": [
+      "B",
+      "Ge",
+      "Si"
+    ],
+    "nitrogen": [
+      "N"
+    ],
+    "boron": [
+      "B"
+    ],
+    "organic_donors": [
+      "N",
+      "O",
+      "S",
+      "P",
+      "F",
+      "Cl",
+      "Br",
+      "I"
+    ],
+    "nonoxygen_chalcogens": [
+      "S",
+      "Se",
+      "Te",
+      "Po"
+    ],
+    "oxide_structural_formers": [
+      "Al",
+      "As",
+      "B",
+      "Br",
+      "C",
+      "Cl",
+      "Cr",
+      "Ga",
+      "Ge",
+      "I",
+      "Mn",
+      "Mo",
+      "Nb",
+      "P",
+      "Pb",
+      "S",
+      "Se",
+      "Si",
+      "Sn",
+      "Ta",
+      "Ti",
+      "V",
+      "W",
+      "Zr"
+    ]
+  },
+  "family_templates": {
+    "elemental.metallic": "elemental_metallic",
+    "elemental.covalent": "elemental_covalent",
+    "elemental.molecular": "elemental_molecular",
+    "inorganic.intermetallic": "intermetallic",
+    "inorganic.halide": "ionic_halide",
+    "inorganic.nitride": "nitride_network",
+    "inorganic.chalcogenide": "chalcogen_subsystem",
+    "inorganic.pnictide": "pnictide_subsystem",
+    "inorganic.carbide": "carbide_subsystem",
+    "inorganic.boride": "boride_subsystem",
+    "inorganic.tetrelide": "tetrelide_subsystem",
+    "inorganic.oxide": "oxide_structural_subsystem",
+    "inorganic.oxysalt": "oxide_structural_subsystem",
+    "inorganic.carbide.covalent": "covalent_network",
+    "inorganic.mixed_anion": "mixed_anion",
+    "organic.molecular": "organic_molecular",
+    "coordination.metal_organic_discrete": "metal_organic",
+    "organic.organometallic_molecular": "metal_organic"
+  },
+  "templates": {
+    "elemental_metallic": {
+      "mode": "metallic_sublattices",
+      "interactions": [
+        {
+          "first": "all_elements",
+          "second": "all_elements",
+          "operation": "metallic_coordination",
+          "layer": "metallic",
+          "priority": "primary",
+          "centres": "all_elements",
+          "ligands": "all_elements"
+        }
+      ]
+    },
+    "elemental_covalent": {
+      "mode": "covalent_network",
+      "interactions": [
+        {
+          "first": "all_elements",
+          "second": "all_elements",
+          "operation": "covalent_network",
+          "layer": "intramolecular",
+          "priority": "primary",
+          "centres": "all_elements",
+          "ligands": "all_elements"
+        }
+      ]
+    },
+    "elemental_molecular": {
+      "mode": "molecular_components",
+      "interactions": [
+        {
+          "first": "all_elements",
+          "second": "all_elements",
+          "operation": "covalent_network",
+          "layer": "intramolecular",
+          "priority": "primary",
+          "centres": "all_elements",
+          "ligands": "all_elements"
+        }
+      ]
+    },
+    "intermetallic": {
+      "mode": "metallic_sublattices",
+      "interactions": [
+        {
+          "first": "all_elements",
+          "second": "all_elements",
+          "operation": "metallic_coordination",
+          "layer": "metallic",
+          "priority": "primary",
+          "centres": "all_elements",
+          "ligands": "all_elements",
+          "expand": "distinct_unordered_pairs"
+        }
+      ]
+    },
+    "organic_molecular": {
+      "mode": "molecular_components",
+      "interactions": [
+        {
+          "first": "all_elements",
+          "second": "all_elements",
+          "operation": "covalent_network",
+          "layer": "intramolecular",
+          "priority": "primary",
+          "centres": "all_elements",
+          "ligands": "all_elements"
+        }
+      ]
+    },
+    "metal_organic": {
+      "mode": "metal_organic",
+      "interactions": [
+        {
+          "first": "nonmetal_elements",
+          "second": "nonmetal_elements",
+          "operation": "covalent_network",
+          "layer": "intramolecular",
+          "priority": "primary",
+          "centres": "nonmetal_elements",
+          "ligands": "nonmetal_elements"
+        },
+        {
+          "first": "metal_elements",
+          "second": "organic_donors",
+          "operation": "centre_ligand_shell",
+          "layer": "coordination",
+          "priority": "primary",
+          "centres": "metal_elements",
+          "ligands": "organic_donors"
+        }
+      ]
+    },
+    "ionic_halide": {
+      "mode": "ionic_sublattices",
+      "interactions": [
+        {
+          "first": "remaining_elements",
+          "second": "halogens",
+          "operation": "centre_ligand_shell",
+          "layer": "coordination",
+          "priority": "primary",
+          "centres": "remaining_elements",
+          "ligands": "halogens"
+        }
+      ]
+    },
+    "nitride_network": {
+      "mode": "structural_anion_subsystem",
+      "interactions": [
+        {
+          "first": "remaining_elements",
+          "second": "nitrogen",
+          "operation": "centre_ligand_shell",
+          "layer": "structural",
+          "priority": "primary",
+          "centres": "remaining_elements",
+          "ligands": "nitrogen"
+        },
+        {
+          "first": "nitrogen",
+          "second": "nitrogen",
+          "operation": "intra_subsystem_bonds",
+          "layer": "intra_subsystem",
+          "priority": "allowed",
+          "centres": "nitrogen",
+          "ligands": "nitrogen"
+        }
+      ]
+    },
+    "carbide_subsystem": {
+      "mode": "cation_anion_subsystem",
+      "interactions": [
+        {
+          "first": "remaining_elements",
+          "second": "carbon",
+          "operation": "centre_ligand_shell",
+          "layer": "coordination",
+          "priority": "primary",
+          "centres": "remaining_elements",
+          "ligands": "carbon"
+        },
+        {
+          "first": "carbon",
+          "second": "carbon",
+          "operation": "intra_subsystem_bonds",
+          "layer": "intra_subsystem",
+          "priority": "allowed",
+          "centres": "carbon",
+          "ligands": "carbon"
+        }
+      ]
+    },
+    "boride_subsystem": {
+      "mode": "cation_anion_subsystem",
+      "interactions": [
+        {
+          "first": "remaining_elements",
+          "second": "boron",
+          "operation": "centre_ligand_shell",
+          "layer": "structural",
+          "priority": "primary",
+          "centres": "remaining_elements",
+          "ligands": "boron"
+        },
+        {
+          "first": "boron",
+          "second": "boron",
+          "operation": "intra_subsystem_bonds",
+          "layer": "intra_subsystem",
+          "priority": "allowed",
+          "centres": "boron",
+          "ligands": "boron"
+        }
+      ]
+    },
+    "tetrelide_subsystem": {
+      "mode": "cation_anion_subsystem",
+      "interactions": [
+        {
+          "first": "remaining_elements",
+          "second": "tetrels",
+          "operation": "centre_ligand_shell",
+          "layer": "coordination",
+          "priority": "primary",
+          "centres": "remaining_elements",
+          "ligands": "tetrels"
+        }
+      ]
+    },
+    "chalcogen_subsystem": {
+      "mode": "cation_anion_subsystem",
+      "interactions": [
+        {
+          "first": "remaining_elements",
+          "second": "nonoxygen_chalcogens",
+          "operation": "centre_ligand_shell",
+          "layer": "coordination",
+          "priority": "primary",
+          "centres": "remaining_elements",
+          "ligands": "nonoxygen_chalcogens"
+        },
+        {
+          "first": "nonoxygen_chalcogens",
+          "second": "nonoxygen_chalcogens",
+          "operation": "intra_subsystem_bonds",
+          "layer": "intra_subsystem",
+          "priority": "allowed",
+          "centres": "nonoxygen_chalcogens",
+          "ligands": "nonoxygen_chalcogens"
+        }
+      ]
+    },
+    "pnictide_subsystem": {
+      "mode": "cation_anion_subsystem",
+      "interactions": [
+        {
+          "first": "remaining_elements",
+          "second": "pnictogens",
+          "operation": "centre_ligand_shell",
+          "layer": "coordination",
+          "priority": "primary",
+          "centres": "remaining_elements",
+          "ligands": "pnictogens"
+        },
+        {
+          "first": "pnictogens",
+          "second": "pnictogens",
+          "operation": "intra_subsystem_bonds",
+          "layer": "intra_subsystem",
+          "priority": "allowed",
+          "centres": "pnictogens",
+          "ligands": "pnictogens"
+        }
+      ]
+    },
+    "oxide_structural_subsystem": {
+      "mode": "structural_anion_subsystem",
+      "interactions": [
+        {
+          "first": "oxide_structural_formers",
+          "second": "oxygen",
+          "operation": "centre_ligand_shell",
+          "layer": "structural",
+          "priority": "primary",
+          "centres": "oxide_structural_formers",
+          "ligands": "oxygen"
+        },
+        {
+          "first": "remaining_electropositive_elements",
+          "second": "oxygen",
+          "operation": "interstitial_coordination",
+          "layer": "interstitial",
+          "priority": "allowed",
+          "centres": "remaining_electropositive_elements",
+          "ligands": "oxygen"
+        }
+      ]
+    },
+    "covalent_network": {
+      "mode": "covalent_network",
+      "interactions": [
+        {
+          "first": "covalent_carbide_formers",
+          "second": "carbon",
+          "operation": "covalent_network",
+          "layer": "structural",
+          "priority": "primary",
+          "centres": "covalent_carbide_formers",
+          "ligands": "carbon"
+        }
+      ]
+    },
+    "mixed_anion": {
+      "mode": "structural_anion_subsystem",
+      "interactions": [
+        {
+          "first": "oxyanion_class_formers",
+          "second": "oxygen",
+          "operation": "centre_ligand_shell",
+          "layer": "structural",
+          "priority": "primary",
+          "centres": "oxyanion_class_formers",
+          "ligands": "oxygen"
+        },
+        {
+          "first": "remaining_electropositive_elements",
+          "second": "remaining_anion_elements",
+          "operation": "mixed_anion_coordination",
+          "layer": "structural",
+          "priority": "primary",
+          "centres": "remaining_electropositive_elements",
+          "ligands": "remaining_anion_elements"
+        }
+      ]
+    }
+  }
+}

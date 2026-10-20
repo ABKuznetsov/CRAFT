@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import TYPE_CHECKING
 
-from cristma.chemistry import InteractionPriority
-from cristma.crystal_chemistry import ReferenceCell, ShellRole
+from cristma.chemistry import InteractionLayer
 
+from craft.adapters.cristma_contacts_presentation import project_contacts
 from craft.core.chemistry import ELEMENT_COLORS
+from craft.core.scientific_cache import INORGANIC_RESULT_SLOTS
 from craft.presentation.inorganic import (
     AtomOrbitView,
     ContactOrbitView,
@@ -27,10 +28,7 @@ if TYPE_CHECKING:
 
 
 def _slot_result(slot: object | None) -> object | None:
-    if slot is None:
-        return None
-    result = getattr(slot, "result", None)
-    return result if result is not None else getattr(slot, "value", None)
+    return getattr(slot, "result", None)
 
 
 def _component_symbol(component: object) -> str:
@@ -102,74 +100,51 @@ def _build_atom_orbits(structure) -> tuple[AtomOrbitView, ...]:
     )
 
 
-def _is_primary(contact: object) -> bool:
-    return any(
-        item.role is ShellRole.PRIMARY
-        for item in getattr(contact, "shell_memberships", ())
-    ) or any(
-        item.grammar_priority is InteractionPriority.PRIMARY
-        for item in getattr(contact, "interpretations", ())
-    )
-
-
-def _build_contact_orbits(structure, resolution) -> tuple[ContactOrbitView, ...]:
+def _build_contact_orbits(structure, resolution, presentation) -> tuple[ContactOrbitView, ...]:
     if resolution is None:
         return ()
+    if presentation is None or presentation.scientific_result is not resolution:
+        presentation = project_contacts(resolution)
+    pair_geometry = {
+        item.geometry_orbit_id: item for item in resolution.pair_table.contact_orbits
+    }
     geometry_by_id = {
-        item.geometry_orbit_id: item
-        for item in resolution.pair_table.contact_orbits
+        orbit.resolved_contact_orbit_id: pair_geometry[orbit.geometry_orbit_id]
+        for orbit in resolution.contact_orbits
     }
     sites_by_id = {site.id: site for site in structure.sites}
-    contacts_by_orbit: dict[str, list[object]] = defaultdict(list)
-    for contact in resolution.materialize_contacts(ReferenceCell()):
-        contacts_by_orbit[contact.resolved_contact_orbit_id].append(contact)
     rows: list[ContactOrbitView] = []
-    for orbit in resolution.contact_orbits:
-        contacts = tuple(contacts_by_orbit.get(orbit.resolved_contact_orbit_id, ()))
-        if not contacts:
-            continue
-        interpretation = orbit.interpretations[0]
-        geometry = geometry_by_id[orbit.geometry_orbit_id]
+    for row in presentation.rows:
+        geometry = geometry_by_id[row.contact_orbit_id]
         first_site = sites_by_id.get(geometry.first_independent_site_id)
         second_site = sites_by_id.get(geometry.second_independent_site_id)
         first_label = _composition_label(first_site) if first_site is not None else "?"
         second_label = _composition_label(second_site) if second_site is not None else "?"
-        primary = any(_is_primary(contact) for contact in contacts)
         rows.append(ContactOrbitView(
-            contact_orbit_id=orbit.resolved_contact_orbit_id,
-            label=interpretation.interaction_type.value.replace("_", " "),
-            classification="primary" if primary else "secondary",
-            interaction_layer=interpretation.interaction_layer.value,
-            instance_count=len(contacts),
-            distance_min=float(geometry.representative_distance),
-            distance_max=float(geometry.representative_distance),
-            initially_visible=primary,
+            contact_orbit_id=row.contact_orbit_id,
+            label=row.interaction_type.value.replace("_", " "),
+            classification=row.classification.value,
+            interaction_layer=row.interaction_layer.value,
+            instance_count=row.instance_count,
+            distance_min=row.distance_min,
+            distance_max=row.distance_max,
+            initially_visible=row.initially_visible,
             pair_label=f"{first_label}–{second_label}",
         ))
     return tuple(rows)
-
-
-def _collect_diagnostics(document: "StructureDocument") -> tuple[object, ...]:
-    diagnostics: list[object] = []
-    seen: set[tuple[str, str]] = set()
-    for field_name in document.scientific.__dataclass_fields__:
-        result = _slot_result(getattr(document.scientific, field_name))
-        for diagnostic in getattr(result, "diagnostics", ()):
-            key = (str(getattr(diagnostic, "code", "")), str(getattr(diagnostic, "message", diagnostic)))
-            if key not in seen:
-                seen.add(key)
-                diagnostics.append(diagnostic)
-    return tuple(diagnostics)
 
 
 def _enum_value(value: object) -> str:
     return str(getattr(value, "value", value))
 
 
-def _build_polyhedron_orbits(structure, result) -> tuple[PolyhedronOrbitView, ...]:
+def _build_polyhedron_orbits(structure, result, contacts=None, units=None) -> tuple[PolyhedronOrbitView, ...]:
     if result is None:
         return ()
     sites = {site.id: site for site in structure.sites}
+    shells = {s.shell_orbit_id: s for s in getattr(contacts, "coordination_shell_orbits", ())}
+    incidences = {i.incidence_orbit_id: i for i in getattr(contacts, "contact_incidence_orbits", ())}
+    units_by_shell = {u.source_shell_orbit_id: u for u in getattr(units, "unit_orbits", ()) if u.source_shell_orbit_id}
     rows: list[PolyhedronOrbitView] = []
     for orbit in result.polyhedron_orbits:
         representative = next(
@@ -181,6 +156,20 @@ def _build_polyhedron_orbits(structure, result) -> tuple[PolyhedronOrbitView, ..
         ligand_label = "".join(
             f"{symbol}{count:g}" for symbol, count in representative.ligand_composition
         )
+        shell = shells.get(representative.source_shell_orbit_id)
+        ligand_counts = Counter()
+        if shell is not None and shell.selected is not None:
+            for incidence_id in shell.selected.primary_incidence_ids:
+                incidence = incidences[incidence_id]
+                ligand_counts[incidence.ligand_independent_site_id] += incidence.incidence_multiplicity_per_center
+        unit = units_by_shell.get(representative.source_shell_orbit_id)
+        geometry = f"CN {representative.coordination_number}"
+        if (representative.coordination_number == 4 and len(representative.faces) == 4
+                and all(len(face) == 3 for face in representative.faces) and (representative.volume or 0) > 0):
+            geometry = "tetrahedron"
+        elif (representative.coordination_number == 3 and unit is not None
+              and unit.representative_geometry.kind.value == "planar_polygon"):
+            geometry = "triangle"
         rows.append(PolyhedronOrbitView(
             polyhedron_orbit_id=orbit.polyhedron_orbit_id,
             representative_polyhedron_id=orbit.representative_polyhedron_id,
@@ -189,6 +178,11 @@ def _build_polyhedron_orbits(structure, result) -> tuple[PolyhedronOrbitView, ..
             coordination_number=representative.coordination_number,
             face_signature=representative.face_signature,
             default_color=_site_color(site),
+            source_site_id=site.id,
+            source_shell_id=representative.source_shell_orbit_id or "",
+            ligand_site_counts=tuple(sorted(ligand_counts.items())),
+            geometry_label=geometry,
+            interaction_role=("interstitial" if unit is not None and InteractionLayer.INTERSTITIAL in unit.interaction_layers else ""),
         ))
     return tuple(rows)
 
@@ -254,7 +248,7 @@ def _build_rings(result) -> tuple[RingOrbitView, ...]:
         RingOrbitView(
             ring_orbit_id=ring.ring_orbit_id,
             parent_block_id=ring.parent_block_id,
-            label=f"{len(ring.unit_orbit_refs)}-membered structural ring",
+            label=f"{len(ring.unit_orbit_refs)}-membered graph cycle · opening unverified",
             size=len(ring.unit_orbit_refs),
             scope=_enum_value(ring.scope),
             multiplicity=ring.multiplicity_in_reference_cell,
@@ -292,18 +286,22 @@ def build_inorganic_presentation(document: "StructureDocument") -> InorganicPres
     blocks_result = _slot_result(document.scientific.blocks)
     connectivity = _slot_result(document.scientific.connectivity)
     rings = _slot_result(document.scientific.rings)
+    classification = _slot_result(document.scientific.inorganic_classification)
+    units = _slot_result(document.scientific.units)
     block_rows = _build_structural_blocks(structure, representation, blocks_result)
     return InorganicPresentation(
         structure_id=structure.id or document.id,
         structure_name=structure.name,
         atom_orbits=_build_atom_orbits(structure),
-        contact_orbits=_build_contact_orbits(structure, contacts),
-        polyhedron_orbits=_build_polyhedron_orbits(structure, polyhedra),
+        contact_orbits=_build_contact_orbits(structure, contacts, document.contact_presentation),
+        polyhedron_orbits=_build_polyhedron_orbits(structure, polyhedra, contacts, units),
         structural_blocks=block_rows,
         rings=_build_rings(rings),
         topology_families=_build_topology_families(connectivity, block_rows),
-        diagnostics=_collect_diagnostics(document),
+        diagnostics=document.scientific.diagnostics(INORGANIC_RESULT_SLOTS),
         stage=document.analysis_stage,
+        compound_classes=classification.groups if classification is not None else (),
+        cation_groups=classification.cation_groups if classification is not None else (),
     )
 
 

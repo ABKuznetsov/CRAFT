@@ -1,4 +1,4 @@
-"""Structure hierarchy and motion analysis."""
+"""CrIStMa result orchestration, presentation and comparison."""
 
 from craft.analysis.hierarchy import HierarchyReport
 from craft.analysis.passport import StructuralPassport, build_structural_passport

@@ -10,8 +10,9 @@ from craft.analysis.reporting.model import (
     ReportRow,
     ReportTable,
 )
-from craft.core.measurement import MeasuredValue, MissingState
+from craft.core.measurement import MeasuredValue, MissingState, parse_cif_number
 from craft.core.model import CrystalStructure
+from craft.analysis.reporting.experiment import build_refinement_table
 
 
 def _reported_cell(value: MeasuredValue) -> ReportCell:
@@ -106,29 +107,6 @@ def build_crystal_data_table(structure: CrystalStructure) -> ReportTable:
     )
 
 
-def build_refinement_table(structure: CrystalStructure) -> ReportTable:
-    prefixes = ("_refine_", "_diffrn_", "_reflns_")
-    rows = tuple(
-        ReportRow(
-            id=f"refine:{tag}",
-            cells={
-                "parameter": ReportCell(tag, tag, Provenance.REPORTED, source_name=tag),
-                "value": ReportCell(raw, raw, Provenance.REPORTED, source_name=tag),
-            },
-        )
-        for tag, raw in structure.source_data.scalars.items()
-        if tag.startswith(prefixes)
-    )
-    return ReportTable(
-        id="refinement",
-        title="Data collection and refinement",
-        columns=(ReportColumn("parameter", "CIF item"), ReportColumn("value", "Value")),
-        rows=rows,
-        availability=Availability.AVAILABLE if rows else Availability.UNAVAILABLE,
-        unavailable_reason="" if rows else "No refinement data are present in the source CIF.",
-    )
-
-
 def _site_value(site, key: str, fallback: float, precision: int = 6) -> ReportCell:
     measured = site.reported.get(key)
     if measured is not None and measured.state is MissingState.PRESENT:
@@ -162,6 +140,7 @@ def build_atomic_sites_table(structure: CrystalStructure) -> ReportTable:
                     "y": _site_value(site, "fract_y", site.fractional[1]),
                     "z": _site_value(site, "fract_z", site.fractional[2]),
                     "occupancy": _site_occupancy(site),
+                    "u_iso_or_equiv": _isotropic_displacement(site),
                     "cart_x": _calculated_cell(float(cart[0]), f"{cart[0]:.5f}"),
                     "cart_y": _calculated_cell(float(cart[1]), f"{cart[1]:.5f}"),
                     "cart_z": _calculated_cell(float(cart[2]), f"{cart[2]:.5f}"),
@@ -171,7 +150,7 @@ def build_atomic_sites_table(structure: CrystalStructure) -> ReportTable:
         )
     return ReportTable(
         id="atomic_sites",
-        title="Atomic sites",
+        title="Atomic coordinates and Uiso/Ueq",
         columns=(
             ReportColumn("label", "Site"),
             ReportColumn("species", "Species"),
@@ -179,6 +158,7 @@ def build_atomic_sites_table(structure: CrystalStructure) -> ReportTable:
             ReportColumn("y", "y"),
             ReportColumn("z", "z"),
             ReportColumn("occupancy", "Occupancy"),
+            ReportColumn("u_iso_or_equiv", "Uiso/Ueq", "Å²"),
             ReportColumn("cart_x", "X", "Å", False),
             ReportColumn("cart_y", "Y", "Å", False),
             ReportColumn("cart_z", "Z", "Å", False),
@@ -187,48 +167,64 @@ def build_atomic_sites_table(structure: CrystalStructure) -> ReportTable:
     )
 
 
-def build_adp_table(structure: CrystalStructure) -> ReportTable:
-    rows: list[ReportRow] = []
-    for site in structure.asymmetric_sites:
-        reported_b = site.reported.get("B_iso_or_equiv")
-        reported_u = site.reported.get("U_iso_or_equiv")
-        if reported_b is not None and reported_b.state is MissingState.PRESENT:
-            u_value = float(reported_b.value) / (8.0 * math.pi**2)
-            parameter = "Biso"
-            reported_cell = _reported_cell(reported_b)
-            u_cell = _calculated_cell(u_value, f"{u_value:.6f}", method_id="B-to-U")
-        elif reported_u is not None and reported_u.state is MissingState.PRESENT:
-            parameter = "Uiso"
-            reported_cell = _reported_cell(reported_u)
-            u_cell = _reported_cell(reported_u)
-        elif site.u_iso is not None:
-            parameter = "Uiso"
-            reported_cell = _calculated_cell(site.u_iso, f"{site.u_iso:.6f}")
-            u_cell = reported_cell
+def _isotropic_displacement(site) -> ReportCell:
+    reported_u = site.reported.get("U_iso_or_equiv")
+    reported_b = site.reported.get("B_iso_or_equiv")
+    if reported_u is not None and reported_u.state is MissingState.PRESENT:
+        return _reported_cell(reported_u)
+    if reported_b is not None and reported_b.state is MissingState.PRESENT:
+        factor = 8.0 * math.pi**2
+        value = float(reported_b.value) / factor
+        su = reported_b.su / factor if reported_b.su is not None else None
+        if su is not None and su > 0:
+            precision = max(0, 1 - math.floor(math.log10(su)))
+            display = f"{value:.{precision}f}({round(su * 10**precision)})"
         else:
+            display = f"{value:.6f}"
+        measured = MeasuredValue(display, value, su=su, unit="Å²", source_name=reported_b.source_name)
+        return ReportCell(measured, display, Provenance.CALCULATED,
+                          source_name=reported_b.source_name, method_id="B-to-U",
+                          warning=f"Reported Biso/Beq: {reported_b.formatted()} Å²; U = B/(8π²).")
+    if reported_u is not None or reported_b is not None:
+        return _reported_cell(reported_u if reported_u is not None else reported_b)
+    if site.u_iso is not None:
+        return _calculated_cell(site.u_iso, f"{site.u_iso:.6f}")
+    return ReportCell(None, "—", Provenance.UNAVAILABLE)
+
+
+def build_anisotropic_table(structure: CrystalStructure) -> ReportTable:
+    """Project CIF tensor components verbatim, retaining their U/B convention."""
+    components = ("11", "22", "33", "12", "13", "23")
+    rows: list[ReportRow] = []
+    for loop in structure.source_data.loops:
+        tags = {tag.casefold().replace(".", "_"): index for index, tag in enumerate(loop.tags)}
+        label_index = tags.get("_atom_site_aniso_label")
+        if label_index is None:
             continue
-        rows.append(
-            ReportRow(
-                id=f"adp:{site.label}",
-                cells={
-                    "label": ReportCell(site.label, site.label, Provenance.REPORTED),
-                    "parameter": ReportCell(parameter, parameter, Provenance.REPORTED),
-                    "reported": reported_cell,
-                    "u_equiv": u_cell,
-                },
-                object_refs=(f"atom:{site.label}",),
-            )
-        )
+        convention = next((kind for kind in ("U", "B") if any(
+            f"_atom_site_aniso_{kind.lower()}_{key}" in tags for key in components)), None)
+        if convention is None:
+            continue
+        for values in loop.rows:
+            label = values[label_index]
+            cells = {"label": ReportCell(label, label, Provenance.REPORTED),
+                     "tensor": ReportCell(convention, convention, Provenance.REPORTED)}
+            for key in components:
+                index = tags.get(f"_atom_site_aniso_{convention.lower()}_{key}")
+                cells[key] = (_reported_cell(parse_cif_number(values[index], unit="Å²", source_name=loop.tags[index]))
+                              if index is not None else ReportCell(None, "—", Provenance.UNAVAILABLE))
+            rows.append(ReportRow(f"aniso:{label}:{convention}", cells, object_refs=(f"atom:{label}",)))
+    conventions = {row.cells["tensor"].display for row in rows}
     return ReportTable(
-        id="adp",
-        title="Atomic displacement parameters",
+        id="anisotropic_adp",
+        title="Anisotropic displacement parameters",
         columns=(
             ReportColumn("label", "Site"),
-            ReportColumn("parameter", "Source convention"),
-            ReportColumn("reported", "Reported", "Å²"),
-            ReportColumn("u_equiv", "U equivalent", "Å²"),
+            ReportColumn("tensor", "Tensor"),
+            *(ReportColumn(key, f"{next(iter(conventions))}{key}" if len(conventions) == 1 else f"U{key}/B{key}", "Å²") for key in components),
         ),
         rows=tuple(rows),
         availability=Availability.AVAILABLE if rows else Availability.UNAVAILABLE,
-        unavailable_reason="" if rows else "No displacement parameters are available.",
+        unavailable_reason="" if rows else "No anisotropic Uij or Bij parameters are reported in the source CIF.",
+        method="Reported CIF tensor components in Å². Tensor specifies the original U or B convention; no tensor conversion is performed.",
     )

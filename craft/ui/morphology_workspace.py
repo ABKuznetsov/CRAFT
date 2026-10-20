@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-import inspect
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -35,15 +35,10 @@ from craft.analysis.twin_geometry import TwinAggregate, build_twin_aggregate
 from craft.analysis.twin_law import twin_cartesian_transform, validate_distinct_twin
 from craft.analysis.twin_state import TwinAggregateKind
 from craft.core.symmetry import parse_affine_operation
-from craft.analysis.morphology_selection import (
-    PrimaryFormSelection,
-    select_primary_forms,
-    with_active_families,
-)
 from craft.analysis.morphology_state import (
     MorphologyEditState,
     apply_edit_state,
-    initialize_primary_selection,
+    initialize_bfdh_forms,
 )
 from craft.core.document import StructureDocument
 from craft.ui.morphology_requests import MorphologyRequestManager, QtMorphologyExecutor
@@ -59,7 +54,6 @@ from craft.ui.twin_table_model import TwinTableModel
 class MorphologyCalculation:
     reference_model: MorphologyModel
     current_model: MorphologyModel
-    selection: PrimaryFormSelection
     state: MorphologyEditState
     color_by_family: object
     twin_aggregate: TwinAggregate | None = None
@@ -75,14 +69,20 @@ class MorphologyWorkspace(QWidget):
     cif_files_dropped = Signal(tuple)
     result_installed = Signal(bool)
 
-    def __init__(self, parent=None, *, executor=None, viewer_factory=MorphologyViewer) -> None:
+    def __init__(
+        self,
+        parent=None,
+        *,
+        executor=None,
+        viewer_factory: Callable[[], MorphologyViewer] = MorphologyViewer,
+    ) -> None:
         super().__init__(parent)
         self.document: StructureDocument | None = None
         self.state = MorphologyEditState()
         self.current_model: MorphologyModel | None = None
         self.current_calculation: MorphologyCalculation | None = None
         self._signature = None
-        self._initialize_primary_on_request = False
+        self._input_identity = None
         self._pending_incompatible_state: MorphologyEditState | None = None
         self._selected_facet_family = None
 
@@ -92,7 +92,7 @@ class MorphologyWorkspace(QWidget):
         self.splitter.setHandleWidth(28)
         self.splitter.setChildrenCollapsible(True)
         root.addWidget(self.splitter)
-        self.viewer = viewer_factory()
+        self.viewer: MorphologyViewer = viewer_factory()
         self.splitter.addWidget(self.viewer)
 
         lower = QFrame()
@@ -138,9 +138,9 @@ class MorphologyWorkspace(QWidget):
         facets_layout = QVBoxLayout(self.facets_page)
         facets_layout.setContentsMargins(0, 6, 0, 0)
         commands = QHBoxLayout()
-        self.primary_coverage_label = QLabel("Primary coverage: 80%")
+        self.primary_coverage_label = QLabel("All BFDH forms")
         commands.addWidget(self.primary_coverage_label)
-        self.restore_primary_button = QPushButton("Restore primary forms")
+        self.restore_primary_button = QPushButton("Restore BFDH forms")
         commands.addWidget(self.restore_primary_button)
         commands.addWidget(QLabel("Maximum |hkl|"))
         self.max_index = QSpinBox()
@@ -296,22 +296,31 @@ class MorphologyWorkspace(QWidget):
         self.splitter.setSizes((max(total - lower, 1), lower))
         self.panel_toggle_button.setText("Hide table")
 
+    def clear_document(self) -> None:
+        """Detach this editor and reject callbacks for its previous input."""
+        self.document = None
+        self._input_identity = None
+        self._signature = None
+        self._cancel_incompatible_state()
+        self._selected_facet_family = None
+        self.current_model = None
+        self.current_calculation = None
+        self.table.setModel(None)
+        self.twin_table.setModel(None)
+        self.striation_table.setModel(None)
+        self.viewer.clear()
+        self._sync_distance_editor()
+        self.status_label.setText("Open a CIF structure to calculate morphology.")
+
     def set_document(self, document: StructureDocument) -> None:
-        changed = self.document is not document
+        input_identity = document.canonical_structure_identity()
+        changed = self.document is not document or self._input_identity != input_identity
         if changed:
-            self._cancel_incompatible_state()
-            self._selected_facet_family = None
-            self.current_model = None
-            self.current_calculation = None
-            self.table.setModel(None)
-            self.twin_table.setModel(None)
-            self.striation_table.setModel(None)
-            self.viewer.clear()
-            self._sync_distance_editor()
+            self.clear_document()
         self.document = document
+        self._input_identity = input_identity
         stored = document.morphology_state
         self.state = stored if isinstance(stored, MorphologyEditState) else MorphologyEditState()
-        self._initialize_primary_on_request = not isinstance(stored, MorphologyEditState)
         self.max_index.blockSignals(True)
         self.max_index.setValue(self.state.max_index)
         self.max_index.blockSignals(False)
@@ -322,46 +331,42 @@ class MorphologyWorkspace(QWidget):
             return
         document = self.document
         state = self.state
-        initialize_primary = self._initialize_primary_on_request
-        signature = (document.id, document.content_identity(), state, initialize_primary)
+        identity = document.canonical_structure_identity()
+        structure = document.legacy_projection
+        signature = (document.id, identity, state)
+        reference_key = ('bfdh-reference:1', identity, state.max_index)
         self._signature = signature
         self.set_loading("Calculating BFDH morphology…")
 
         def work():
-            base = build_bfdh_planes(document.legacy_projection, state.max_index)
-            selection = select_primary_forms(
-                document.legacy_projection.cell,
-                base,
-                target=state.selection_policy.target,
-            )
-            resolved_state = (
-                initialize_primary_selection(state, selection)
-                if initialize_primary
-                else state
-            )
-            planes = apply_edit_state(document.legacy_projection, base, resolved_state)
-            current_model = build_morphology_model(document.legacy_projection.cell, planes)
-            reference_model = build_morphology_model(
-                document.legacy_projection.cell,
-                with_active_families(base, {plane.family.hkl for plane in base}),
-            )
+            reference_model = document.morphology_cache.get(reference_key)
+            if reference_model is None:
+                base = build_bfdh_planes(structure, state.max_index)
+                reference_model = build_morphology_model(structure.cell, base)
+                if document.canonical_structure_identity() == identity:
+                    document.morphology_cache[reference_key] = reference_model
+            base = reference_model.planes
+            resolved_state = initialize_bfdh_forms(state, base)
+            planes = apply_edit_state(structure, base, resolved_state)
+            current_model = (reference_model if planes == base else
+                             build_morphology_model(structure.cell, planes))
             colors = allocate_family_colors(plane.family.hkl for plane in planes)
             twin_aggregate = None
             induction_contours = []
             twin_segments = ()
             if resolved_state.twin is not None:
                 transform = twin_cartesian_transform(
-                    document.legacy_projection.cell,
+                    structure.cell,
                     resolved_state.twin.law,
                 )
                 rotations = tuple(
                     parse_affine_operation(operation).rotation
-                    for operation in document.legacy_projection.symmetry_operations
+                    for operation in structure.symmetry_operations
                 )
                 validate_distinct_twin(
                     transform,
                     rotations,
-                    document.legacy_projection.cell,
+                    structure.cell,
                 )
                 twin_aggregate = build_twin_aggregate(
                     document.legacy_projection.cell,
@@ -396,7 +401,6 @@ class MorphologyWorkspace(QWidget):
             calculation = MorphologyCalculation(
                 reference_model,
                 current_model,
-                selection,
                 resolved_state,
                 colors,
                 twin_aggregate,
@@ -408,17 +412,16 @@ class MorphologyWorkspace(QWidget):
         self._requests.request(signature, work)
 
     def _ready(self, signature, bundle) -> None:
-        if signature != self._signature:
+        if not self._is_current_request(signature):
             return
         calculation, reset_camera = bundle
         self.state = calculation.state
-        self._initialize_primary_on_request = False
         if self.document is not None:
             self.document.morphology_state = self.state
         self.install_result(calculation, reset_camera=reset_camera)
 
     def _failed(self, signature, error: BaseException) -> None:
-        if signature == self._signature:
+        if self._is_current_request(signature):
             if self.current_calculation is not None:
                 self.state = self.current_calculation.state
                 self.twin_editor.set_spec(self.state.twin)
@@ -426,11 +429,17 @@ class MorphologyWorkspace(QWidget):
                     self.document.morphology_state = self.state
                     self._signature = (
                         self.document.id,
-                        self.document.content_identity(),
+                        self.document.canonical_structure_identity(),
                         self.state,
-                        False,
                     )
             self.show_error(str(error))
+
+    def _is_current_request(self, signature) -> bool:
+        return (
+            signature == self._signature
+            and self.document is not None
+            and signature == (self.document.id, self.document.canonical_structure_identity(), self.state)
+        )
 
     def install_result(
         self,
@@ -443,11 +452,9 @@ class MorphologyWorkspace(QWidget):
         else:
             if self.document is None:
                 raise ValueError("A document is required to install a morphology model.")
-            selection = select_primary_forms(self.document.legacy_projection.cell, result.planes)
             calculation = MorphologyCalculation(
                 result,
                 result,
-                selection,
                 self.state,
                 allocate_family_colors(plane.family.hkl for plane in result.planes),
             )
@@ -467,7 +474,6 @@ class MorphologyWorkspace(QWidget):
             self.table,
             color_by_family=calculation.color_by_family,
             reference_model=calculation.reference_model,
-            primary_families=set(calculation.state.primary_families),
             user_added_families=user_added_families,
         )
         table_model.edit_requested.connect(self._edit_requested)
@@ -499,23 +505,15 @@ class MorphologyWorkspace(QWidget):
         set_name = getattr(self.viewer, "set_structure_name", None)
         if set_name is not None and self.document is not None:
             set_name(self.document.display_name)
-        set_model = self.viewer.set_model
-        if "color_by_family" in inspect.signature(set_model).parameters:
-            viewer_arguments = {
-                "color_by_family": calculation.color_by_family,
-                "reset_camera": reset_camera,
-            }
-            parameters = inspect.signature(set_model).parameters
-            if "aggregate" in parameters:
-                viewer_arguments.update(
-                    aggregate=calculation.twin_aggregate,
-                    induction_contours=calculation.induction_contours,
-                    twin_segments=calculation.twin_segments,
-                    markings=calculation.state.markings,
-                )
-            set_model(model, **viewer_arguments)
-        else:
-            set_model(model, reset_camera=reset_camera)
+        self.viewer.set_model(
+            model,
+            color_by_family=calculation.color_by_family,
+            reset_camera=reset_camera,
+            aggregate=calculation.twin_aggregate,
+            induction_contours=calculation.induction_contours,
+            twin_segments=calculation.twin_segments,
+            markings=calculation.state.markings,
+        )
         manifested = sum(area > 0.0 for area in model.area_by_family.values())
         warnings = model.warnings + (
             ()
@@ -527,8 +525,7 @@ class MorphologyWorkspace(QWidget):
             f"BFDH ready · {manifested} manifested families · relative volume {model.volume:.6g}{warning}"
         )
         self.primary_coverage_label.setText(
-            "Primary forms: target 80% · "
-            f"coverage {100.0 * calculation.selection.coverage:.1f}%"
+            f"Forms: {sum(plane.enabled for plane in model.planes)}/{len(model.planes)} enabled"
         )
         self.result_installed.emit(True)
 
@@ -563,10 +560,12 @@ class MorphologyWorkspace(QWidget):
         self.mismatch_bar.hide()
 
     def _edit_requested(self, edit: MorphologyTableEdit) -> None:
+        plane = self._plane_for_family(edit.hkl)
+        equivalents = plane.family.equivalents if plane is not None else ()
         if edit.rho is not None:
-            self.state = self.state.with_distance(edit.hkl, edit.rho)
+            self.state = self.state.with_distance(edit.hkl, edit.rho, equivalents=equivalents)
         if edit.enabled is not None:
-            self.state = self.state.with_enabled(edit.hkl, edit.enabled)
+            self.state = self.state.with_enabled(edit.hkl, edit.enabled, equivalents=equivalents)
         if self.document is not None:
             self.document.morphology_state = self.state
         self._request(reset_camera=False)
@@ -585,14 +584,16 @@ class MorphologyWorkspace(QWidget):
         return model.data(model.index(index.row(), 0), MorphologyTableModel.FamilyRole)
 
     def _selected_plane(self):
-        if self.current_model is None or self._selected_facet_family is None:
+        return self._plane_for_family(self._selected_facet_family)
+
+    def _plane_for_family(self, family):
+        if self.current_model is None or family is None:
             return None
         return next(
             (
                 plane
                 for plane in self.current_model.planes
-                if self._selected_facet_family == plane.family.hkl
-                or self._selected_facet_family in plane.family.equivalents
+                if family == plane.family.hkl or family in plane.family.equivalents
             ),
             None,
         )
@@ -643,7 +644,7 @@ class MorphologyWorkspace(QWidget):
         plane = self._selected_plane()
         if plane is None:
             return
-        self.state = self.state.with_distance(plane.family.hkl, rho)
+        self.state = self.state.with_distance(plane.family.hkl, rho, equivalents=plane.family.equivalents)
         if self.document is not None:
             self.document.morphology_state = self.state
         self._request(reset_camera=False)
@@ -662,7 +663,9 @@ class MorphologyWorkspace(QWidget):
         family = self._selected_family()
         if family is None:
             return
-        self.state = self.state.reset_family(family)
+        plane = self._plane_for_family(family)
+        equivalents = plane.family.equivalents if plane is not None else ()
+        self.state = self.state.reset_family(family, equivalents=equivalents)
         if self.document is not None:
             self.document.morphology_state = self.state
         self._request(reset_camera=False)
@@ -822,9 +825,8 @@ class MorphologyWorkspace(QWidget):
                 self.document.morphology_state = state
                 self._signature = (
                     self.document.id,
-                    self.document.content_identity(),
+                    self.document.canonical_structure_identity(),
                     state,
-                    False,
                 )
             self.install_result(replace(self.current_calculation, state=state), reset_camera=False)
             return

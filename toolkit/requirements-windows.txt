@@ -1,8 +1,9 @@
-cristma==0.1.0b10
+cristma==0.1.0b13
 networkx>=3.3,<4
 numpy>=1.26,<3
 platformdirs>=4,<5
 pymatgen>=2024.5
+python-docx>=1.1,<2
 pyvista>=0.46,<0.49
 pyvistaqt>=0.11,<0.12
 PySide6>=6.7,<6.12

@@ -16,14 +16,12 @@ def _hkl_text(hkl: tuple[int, int, int]) -> str:
     return " ".join(str(value) for value in hkl)
 
 
-def _origin(state: MorphologyEditState | None, hkl: Hkl) -> str:
+def _origin(state: MorphologyEditState | None, equivalents: tuple[Hkl, ...]) -> str:
     if state is None:
         return "BFDH"
-    if any(item.user_added and item.hkl == hkl for item in state.overrides):
+    if any(item.user_added and item.hkl in equivalents for item in state.overrides):
         return "user-added"
-    if hkl in state.primary_families:
-        return "primary 80%"
-    return "additional BFDH"
+    return "BFDH"
 
 
 def _law_text(state: MorphologyEditState | None) -> str:
@@ -105,7 +103,7 @@ def export_morphology_csv(
                         "area_relative": f"{model.area_by_family.get(family_hkl, 0.0):.12g}",
                         "area_fraction": f"{model.fraction_by_family.get(family_hkl, 0.0):.12g}",
                         "current_fraction": f"{model.fraction_by_family.get(family_hkl, 0.0):.12g}",
-                        "origin": _origin(state, family_hkl),
+                        "origin": _origin(state, plane.family.equivalents),
                         "color": colors.get(family_hkl, ""),
                         "state": "manual" if plane.manual else "BFDH",
                         "twin_kind": "" if twin is None else twin.kind.value,

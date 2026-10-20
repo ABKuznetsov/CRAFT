@@ -36,7 +36,12 @@ from craft.core.chemistry import (
     site_radius,
 )
 from craft.core.model import AtomSite, CrystalStructure
-from craft.core.document import StructureDocument, VisualizationState
+from craft.core.document import StructureDocument
+from craft.core.visualization import VISIBILITY_FIELDS, VisualizationState
+from craft.presentation.scene_selection import native_isolation_state
+from craft.ui.viewer_state import apply_viewer_state, reset_viewer_visibility
+from craft.ui.camera_controls import view_lattice_axis, zoom_view
+from craft.ui.view_layout import ViewLayoutDrag
 from craft.core.scene import SceneData
 from craft.presentation.inorganic_scene import (
     InorganicSceneData,
@@ -86,6 +91,9 @@ def _native_layer_plan(viewer) -> _NativeLayerPlan:
     prevents unrelated display layers from leaking into the selected view.
     """
 
+    if getattr(viewer, "crystal_layers_enabled", False):
+        return _NativeLayerPlan(atoms=bool(viewer.show_atoms), contacts=bool(viewer.show_bonds),
+                                polyhedra=bool(viewer.show_polyhedra), blocks=True)
     level = HierarchyLevel(getattr(viewer, "level", HierarchyLevel.SITES))
     if level == HierarchyLevel.SITES:
         return _NativeLayerPlan(
@@ -114,7 +122,7 @@ def _native_layer_plan(viewer) -> _NativeLayerPlan:
         return _NativeLayerPlan(blocks=True)
     return _NativeLayerPlan(topology=True)
 
-from craft.ui.legend import atom_legend_labels
+from craft.ui.legend import atom_legend_labels, compass_viewport
 from craft.ui.render_batches import (
     CYLINDER_RESOLUTION,
     CylinderInstance,
@@ -139,6 +147,7 @@ PICK_BLOCK = 5
 PICK_CONTACT = 6
 PICK_NET_NODE = 7
 PICK_NET_EDGE = 8
+PICK_CRYSTAL_LAYER = 9
 
 
 def _picked_source_index(picked, primitive_kind: int) -> int | None:
@@ -191,6 +200,9 @@ def picked_scene_object(picked, hierarchy, scene, requested_kind: str):
             return None
         return requested, getattr(records[index], field)
     if isinstance(scene, InorganicSceneData):
+        layer_index = _picked_source_index(picked, PICK_CRYSTAL_LAYER)
+        if layer_index is not None and 0 <= layer_index < len(scene.crystal_layers):
+            return "crystal_layer", scene.crystal_layers[layer_index].key
         collection = {
             "atom": (PICK_ATOM, scene.atoms),
             "bond": (PICK_BOND, scene.contacts),
@@ -421,7 +433,9 @@ def _composition_display_radius(
     if radius_model == "uniform":
         return 0.40
     if radius_model == "coordination_ionic" and coordination is not None and len(occupied) == 1:
-        return float(_coordination_ionic_radius(occupied[0][0], coordination))
+        # Very small reference radii (e.g. CN3 B at 0.01 Å) disappear inside
+        # planar faces and bond cylinders.  This floor is display-only.
+        return max(.18, float(_coordination_ionic_radius(occupied[0][0], coordination)))
     total = sum(weight for _symbol, weight in occupied)
     radius = (
         sum(COVALENT_RADII.get(symbol, 1.0) * weight for symbol, weight in occupied)
@@ -528,6 +542,16 @@ class CrystalInteractor(QtInteractor):
             return
         super().dropEvent(event)
 
+    def event(self, event) -> bool:
+        if (event.type() == QEvent.Type.NativeGesture
+                and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture):
+            factor = 1.0 + event.value()
+            if np.isfinite(factor) and factor > 0.0 and factor != 1.0:
+                zoom_view(self, factor)
+            event.accept()
+            return True
+        return super().event(event)
+
     def wheelEvent(self, event) -> None:
         angle = event.angleDelta().y()
         pixel = event.pixelDelta().y()
@@ -565,7 +589,6 @@ class StructureViewer(QWidget):
         self.native_scene: InorganicSceneData | OrganicSceneData | None = None
         self.native_presentation = None
         self.hierarchy: HierarchyReport | None = None
-        self.level = HierarchyLevel.SITES
         self.atom_scale = 1.0
         self.polyhedron_opacity = 0.36
         self.show_cell = True
@@ -587,6 +610,9 @@ class StructureViewer(QWidget):
         self.cell_line_width = 1.8
         self.show_cell_dimensions = False
         self.axes_size = 0.30
+        self.legend_scale = 1.0
+        self.axes_position = None
+        self.legend_position = None
         self.bond_radius = 0.05
         self.polyhedron_edge_radius = 0.020
         self.color_by = "automatic"
@@ -595,21 +621,7 @@ class StructureViewer(QWidget):
         self._polyhedron_legend_labels: list[vtkTextActor] = []
         self._polyhedron_surface_cache: dict[str, pv.PolyData | None] = {}
         self._unit_geometry_surface_cache: dict[str, pv.PolyData | None] = {}
-        self.hidden_atom_indices: set[int] = set()
-        self.hidden_atom_orbit_ids: set[str] = set()
-        self.hidden_atom_instance_keys: set[tuple[str, tuple[int, int, int]]] = set()
-        self.hidden_bond_orbits: set[str] = set()
-        self.hidden_bond_families: set[tuple[str, str]] = set()
-        self.hidden_contact_orbit_ids: set[str] = set()
-        self.contact_orbit_colors: dict[str, str] = {}
-        self.hidden_polyhedron_ids: set[str] = set()
-        self.hidden_polyhedron_orbit_ids: set[str] = set()
-        self.block_auto_hidden_atom_ids: dict[str, frozenset[str]] = {}
-        self.block_auto_hidden_polyhedron_orbit_ids: dict[str, frozenset[str]] = {}
-        self.hidden_unit_ids: set[str] = set()
-        self.hidden_block_ids: set[str] = set()
-        self.hidden_connector_ids: set[str] = set()
-        self.hidden_topology_family_ids: set[str] = set()
+        apply_viewer_state(self, VisualizationState())
         self.selected_polyhedron_id: str | None = None
         self.selected_scene_object: tuple[str, object] | None = None
         self.edit_mode = False
@@ -618,15 +630,7 @@ class StructureViewer(QWidget):
         self._held_edit_key: int | None = None
         self._held_axis_key: int | None = None
         self._axis_drag_position = None
-        self.atom_orbit_colors: dict[str, str] = {}
-        self.polyhedron_orbit_colors: dict[str, str] = {}
-        self.shown_unit_ids: set[str] = set()
-        self.shown_ring_ids: set[str] = set()
-        self.shown_block_ids: set[str] = set()
         self.ring_motifs = None
-        self.ring_scope_colors: dict[str, str] = dict(RING_SCOPE_COLORS)
-        self.unit_colors: dict[str, str] = {}
-        self.block_colors: dict[str, str] = {}
         self.comparison_highlight: ComparisonHighlight | None = None
         self._document: StructureDocument | None = None
         self.render_style = "publication"
@@ -634,6 +638,8 @@ class StructureViewer(QWidget):
         self.plotter.enable_parallel_projection()
         self.plotter.enable_anti_aliasing("ssaa")
         self.plotter.enable_depth_peeling(number_of_peels=8, occlusion_ratio=0.0)
+        self._layout_drag = ViewLayoutDrag(self)
+        self.plotter.setToolTip("Drag to rotate; double-click a structure, legend or compass to move it. Esc cancels.")
 
     def set_render_style(self, style: str) -> None:
         self.render_style = style.lower()
@@ -648,6 +654,8 @@ class StructureViewer(QWidget):
             self.plotter.disable_parallel_projection()
 
     def set_edit_mode(self, enabled: bool) -> None:
+        if enabled and hasattr(self, "_layout_drag"):
+            self._layout_drag.cancel()
         self.edit_mode = bool(enabled)
         if not self.edit_mode:
             self.edit_target_kind = None
@@ -669,6 +677,8 @@ class StructureViewer(QWidget):
         if watched is not self.plotter:
             return super().eventFilter(watched, event)
         event_type = event.type()
+        if hasattr(self, "_layout_drag") and self._layout_drag.handle(event):
+            return True
         target_keys = {
             Qt.Key.Key_A: "atom",
             Qt.Key.Key_B: "bond",
@@ -748,10 +758,14 @@ class StructureViewer(QWidget):
         scene: SceneData,
         hierarchy: HierarchyReport,
         reset_camera: bool = True,
+        *,
+        redraw: bool = True,
     ) -> None:
         if self.structure is not structure:
             self.reset_visibility(redraw=False)
             self.comparison_highlight = None
+            self.selected_scene_object = None
+            self.selected_polyhedron_id = None
         if self.hierarchy is not hierarchy:
             self._polyhedron_surface_cache.clear()
             cache = getattr(self, "_unit_geometry_surface_cache", None)
@@ -762,7 +776,8 @@ class StructureViewer(QWidget):
         self.native_scene = None
         self.native_presentation = None
         self.hierarchy = hierarchy
-        self.redraw(reset_camera=reset_camera)
+        if redraw:
+            self.redraw(reset_camera=reset_camera)
 
     def set_native_data(
         self,
@@ -770,16 +785,21 @@ class StructureViewer(QWidget):
         scene: InorganicSceneData | OrganicSceneData,
         presentation,
         reset_camera: bool = True,
+        *,
+        redraw: bool = True,
     ) -> None:
         if self.structure is not structure:
             self.reset_visibility(redraw=False)
             self.comparison_highlight = None
+            self.selected_scene_object = None
+            self.selected_polyhedron_id = None
         self.structure = structure
         self.scene = scene
         self.native_scene = scene
         self.native_presentation = presentation
         self.hierarchy = None
-        self.redraw(reset_camera=reset_camera)
+        if redraw:
+            self.redraw(reset_camera=reset_camera)
 
     def set_document(
         self,
@@ -818,57 +838,26 @@ class StructureViewer(QWidget):
                     else document.organic_presentation()
                 ),
                 reset_camera,
+                redraw=False,
             )
         else:
-            self.set_data(document.legacy_projection, scene, document.hierarchy, reset_camera)
-        self.apply_visual_state(document.visual, redraw=True)
+            self.set_data(
+                document.legacy_projection, scene, document.hierarchy,
+                reset_camera, redraw=False,
+            )
+        self.apply_visual_state(document.visual, redraw=False)
+        if document.analysis_stage == "parsed":
+            # Render the available atom preview without discarding the user's
+            # requested level, which will be restored with the next snapshot.
+            self.level = HierarchyLevel.SITES
+        self.redraw(reset_camera=reset_camera)
 
     def apply_visual_state(
         self,
         state: VisualizationState,
         redraw: bool = True,
     ) -> None:
-        self.level = HierarchyLevel(state.level)
-        self.hidden_atom_indices = set(state.hidden_atom_indices)
-        self.hidden_atom_orbit_ids = set(
-            getattr(state, "hidden_atom_orbit_ids", set())
-        )
-        self.hidden_atom_instance_keys = set(
-            getattr(state, "hidden_atom_instance_keys", set())
-        )
-        self.hidden_bond_orbits = set(state.hidden_bond_orbits)
-        self.hidden_bond_families = set(state.hidden_bond_families)
-        self.hidden_contact_orbit_ids = set(
-            getattr(state, "hidden_contact_orbit_ids", set())
-        )
-        self.contact_orbit_colors = dict(
-            getattr(state, "contact_orbit_colors", {})
-        )
-        self.hidden_polyhedron_ids = set(state.hidden_polyhedron_ids)
-        self.hidden_polyhedron_orbit_ids = set(
-            getattr(state, "hidden_polyhedron_orbit_ids", set())
-        )
-        self.block_auto_hidden_atom_ids = dict(
-            getattr(state, "block_auto_hidden_atom_ids", {})
-        )
-        self.block_auto_hidden_polyhedron_orbit_ids = dict(
-            getattr(state, "block_auto_hidden_polyhedron_orbit_ids", {})
-        )
-        self.hidden_unit_ids = set(state.hidden_unit_ids)
-        self.hidden_block_ids = set(state.hidden_block_ids)
-        self.hidden_connector_ids = set(state.hidden_connector_ids)
-        self.hidden_topology_family_ids = set(state.hidden_topology_family_ids)
-        self.atom_orbit_colors = dict(state.atom_orbit_colors)
-        self.polyhedron_orbit_colors = dict(state.polyhedron_orbit_colors)
-        self.shown_unit_ids = set(state.shown_unit_ids)
-        self.shown_ring_ids = set(state.shown_ring_ids)
-        self.shown_block_ids = set(state.shown_block_ids)
-        self.unit_colors = dict(state.unit_colors)
-        self.block_colors = dict(state.block_colors)
-        self.ring_scope_colors = {
-            **RING_SCOPE_COLORS,
-            **getattr(state, "ring_scope_colors", {}),
-        }
+        apply_viewer_state(self, state)
         if redraw:
             self.redraw(reset_camera=False)
 
@@ -924,23 +913,7 @@ class StructureViewer(QWidget):
         self.plotter.render()
 
     def reset_visibility(self, redraw: bool = True) -> None:
-        self.hidden_atom_indices.clear()
-        getattr(self, "hidden_atom_orbit_ids", set()).clear()
-        getattr(self, "hidden_atom_instance_keys", set()).clear()
-        self.hidden_bond_orbits.clear()
-        self.hidden_bond_families.clear()
-        getattr(self, "hidden_contact_orbit_ids", set()).clear()
-        self.hidden_polyhedron_ids.clear()
-        getattr(self, "hidden_polyhedron_orbit_ids", set()).clear()
-        getattr(self, "block_auto_hidden_atom_ids", {}).clear()
-        getattr(self, "block_auto_hidden_polyhedron_orbit_ids", {}).clear()
-        self.hidden_unit_ids.clear()
-        self.hidden_block_ids.clear()
-        self.hidden_connector_ids.clear()
-        self.hidden_topology_family_ids.clear()
-        self.shown_unit_ids.clear()
-        getattr(self, "shown_ring_ids", set()).clear()
-        self.shown_block_ids.clear()
+        reset_viewer_visibility(self)
         if redraw:
             self.redraw(reset_camera=False)
 
@@ -965,7 +938,11 @@ class StructureViewer(QWidget):
         elif kind == "unit":
             self.hidden_unit_ids.add(str(object_id))
         elif kind == "block":
-            self.hidden_block_ids.add(str(object_id))
+            if isinstance(getattr(self, "native_scene", None), InorganicSceneData):
+                from craft.presentation.block_state import set_block_visibility
+                set_block_visibility(self, self.native_presentation, object_id, False)
+            else:
+                self.hidden_block_ids.add(str(object_id))
         elif kind == "connector":
             self.hidden_connector_ids.add(str(object_id))
         if self.selected_scene_object == (kind, object_id):
@@ -973,7 +950,19 @@ class StructureViewer(QWidget):
         if redraw:
             self.redraw(reset_camera=False)
 
-    def isolate_object(self, kind: str, object_id) -> None:
+    def isolate_object(self, kind: str, object_id) -> bool:
+        native_scene = getattr(self, "native_scene", None)
+        if isinstance(native_scene, (InorganicSceneData, OrganicSceneData)):
+            state = native_isolation_state(
+                native_scene, self.native_presentation, kind, str(object_id),
+            )
+            if state is None:
+                return False
+            for name in VISIBILITY_FIELDS:
+                setattr(self, name, getattr(state, name))
+            self.crystal_layers_enabled = False
+            self.redraw(reset_camera=True)
+            return True
         self.reset_visibility(redraw=False)
         if kind == "atom":
             keep = {int(object_id)}
@@ -992,7 +981,7 @@ class StructureViewer(QWidget):
                 }
                 self.hidden_contact_orbit_ids = orbit_ids - {object_id, ""}
                 self.redraw(reset_camera=False)
-                return
+                return True
             selected_family = tuple(sorted(str(value) for value in object_id))
             if self._document is not None:
                 families = set(bond_families(self._document))
@@ -1038,6 +1027,7 @@ class StructureViewer(QWidget):
                 if value.id not in {item.first_block, item.second_block}
             }
         self.redraw(reset_camera=True)
+        return True
 
     def _polyhedron_visible(self, polyhedron) -> bool:
         if polyhedron.id in self.hidden_polyhedron_ids:
@@ -1055,6 +1045,8 @@ class StructureViewer(QWidget):
         self.redraw(reset_camera=crosses_topology)
 
     def redraw(self, reset_camera: bool = False) -> None:
+        if hasattr(self, "_layout_drag"):
+            self._layout_drag.cancel()
         self._remove_polyhedron_legend()
         self.plotter.clear()
         if getattr(self, "native_scene", None) is not None:
@@ -1128,7 +1120,8 @@ class StructureViewer(QWidget):
                 tip_length=0.28,
                 label_size=(0.18, 0.08),
                 ambient=0.72,
-                viewport=(0.01, 0.01, self.axes_size, self.axes_size),
+                viewport=compass_viewport(self),
+                interactive=False,
             )
             # The labels remain attached to the rotating triad.  Different
             # radial offsets keep projected labels apart in near-axial views.
@@ -1151,6 +1144,17 @@ class StructureViewer(QWidget):
         if scene is None or presentation is None:
             return
         layers = _native_layer_plan(self)
+        layer_mode = bool(getattr(self, "crystal_layers_enabled", False) and any(
+            self.crystal_layers.get(layer.key) is not None and self.crystal_layers[layer.key].visible
+            for layer in scene.crystal_layers
+        ))
+        context_opacity = .25 if layer_mode else 1.0
+        display_layers = scene.crystal_layers
+        if layer_mode:
+            from craft.presentation.crystal_layers import displayed_crystal_layer
+            display_layers = tuple(displayed_crystal_layer(
+                layer, self.crystal_layers, getattr(getattr(self, "structure", None), "cell", None),
+            ) for layer in scene.crystal_layers)
 
         if layers.topology:
             self._draw_native_topology(reset_camera)
@@ -1171,12 +1175,28 @@ class StructureViewer(QWidget):
                 )
 
         atom_rows = {row.source_site_id: row for row in presentation.atom_orbits}
-        atoms = visible_native_atoms(scene, self)
+        atoms = visible_native_atoms(scene, self, include_auto_hidden=layers.blocks and not layer_mode)
+        visible_atom_lookup = {
+            (atom.atom_id, atom.cell_translation): atom for atom in atoms
+        }
         detail = detail_level_for_atom_count(len(atoms))
         atom_lookup = {
             (atom.atom_id, atom.cell_translation): atom for atom in scene.atoms
         }
-        visible_meshes = set(visible_native_polyhedra(scene, self))
+        visible_meshes = set(visible_native_polyhedra(scene, self, include_auto_hidden=layers.blocks and not layer_mode))
+        if layer_mode:
+            highlighted = {
+                (poly.polyhedron_orbit_id, tuple(round(value, 6) for value in poly.center))
+                for layer in display_layers
+                if layer.key in self.crystal_layers and self.crystal_layers[layer.key].visible
+                and not (layer.priority == 1
+                         and self.crystal_layers[layer.key].representation == "edges")
+                for poly in layer.polyhedra
+            }
+            visible_meshes = {mesh for mesh in visible_meshes if (
+                mesh.polyhedron_orbit_id,
+                tuple(round(value, 6) for value in atom_lookup[(mesh.center_atom_id, mesh.center_translation)].cartesian),
+            ) not in highlighted}
         poly_rows = {
             row.polyhedron_orbit_id: row for row in presentation.polyhedron_orbits
         }
@@ -1215,8 +1235,8 @@ class StructureViewer(QWidget):
                     or contact.second_atom_id in block_member_atom_ids
                 ):
                     continue
-                first = atom_lookup.get((contact.first_atom_id, contact.first_translation))
-                second = atom_lookup.get((contact.second_atom_id, contact.second_translation))
+                first = visible_atom_lookup.get((contact.first_atom_id, contact.first_translation))
+                second = visible_atom_lookup.get((contact.second_atom_id, contact.second_translation))
                 if first is None or second is None:
                     continue
                 if (
@@ -1264,13 +1284,13 @@ class StructureViewer(QWidget):
                     rgb=True,
                     preference="point",
                     smooth_shading=True,
-                    opacity=0.96,
+                    opacity=0.96 * context_opacity,
                 )
             for color, instances in contact_groups.items():
                 mesh = build_cylinder_batch(instances, detail)
                 if mesh is not None:
                     _tag_pick_kind(mesh, PICK_BOND)
-                    self.plotter.add_mesh(mesh, color=color, smooth_shading=True)
+                    self.plotter.add_mesh(mesh, color=color, smooth_shading=True, opacity=context_opacity)
 
         if layers.polyhedra:
             atom_by_key = {
@@ -1331,7 +1351,7 @@ class StructureViewer(QWidget):
                 self.plotter.add_mesh(
                     surface_mesh,
                     color=color,
-                    opacity=self.polyhedron_opacity,
+                    opacity=self.polyhedron_opacity * context_opacity,
                     show_edges=False,
                 )
             edge_mesh = build_surface_batch(edge_instances)
@@ -1341,7 +1361,7 @@ class StructureViewer(QWidget):
                     edge_mesh,
                     color="#000000",
                     smooth_shading=True,
-                    opacity=0.92,
+                    opacity=0.92 * context_opacity,
                 )
 
             if self.show_polyhedron_spokes:
@@ -1354,6 +1374,8 @@ class StructureViewer(QWidget):
                         (item.center_atom_id, item.center_translation)
                     )
                     if center is None:
+                        continue
+                    if (item.center_atom_id, item.center_translation) not in visible_atom_lookup:
                         continue
                     center_point = np.asarray(center.cartesian, dtype=float)
                     center_row = atom_rows.get(center.source_site_id)
@@ -1375,6 +1397,8 @@ class StructureViewer(QWidget):
                             if vertex_index < len(item.vertex_compositions)
                             else ()
                         )
+                        if site_id in self.hidden_atom_orbit_ids:
+                            continue
                         key = tuple(
                             round(float(value), 5)
                             for value in (*center_point, *vertex_point)
@@ -1405,11 +1429,11 @@ class StructureViewer(QWidget):
                         rgb=True,
                         preference="point",
                         smooth_shading=True,
-                        opacity=0.96,
+                        opacity=0.96 * context_opacity,
                     )
 
-            # Ligand atoms are part of a polyhedron representation, not of the
-            # optional all-atoms layer.  Keep them at every visible vertex.
+            # Centres and ligands belong to the polyhedron representation,
+            # independently of the optional all-atoms layer.
             vertex_items: list[tuple[str, SphereInstance]] = []
             seen_vertices: set[tuple[float, float, float, str]] = set()
             for index, item in enumerate(scene.polyhedra):
@@ -1419,6 +1443,23 @@ class StructureViewer(QWidget):
                 if center is None:
                     continue
                 origin = np.asarray(center.cartesian, dtype=float)
+                center_row = atom_rows.get(center.source_site_id)
+                center_color = self.atom_orbit_colors.get(
+                    center.source_site_id,
+                    center_row.default_color if center_row is not None else _composition_color(center.composition),
+                )
+                center_key = (*tuple(round(float(value), 5) for value in origin), center.source_site_id)
+                if (center_key not in seen_vertices
+                        and (item.center_atom_id, item.center_translation) in visible_atom_lookup):
+                    seen_vertices.add(center_key)
+                    vertex_items.append((center_color, SphereInstance(
+                        tuple(float(value) for value in origin),
+                        _composition_display_radius(
+                            center.composition, self.radius_model,
+                            getattr(poly_rows.get(item.polyhedron_orbit_id), "coordination_number", None),
+                        ) * self.atom_scale,
+                        index,
+                    )))
                 for vertex_index, local_vertex in enumerate(item.local_vertices):
                     point = origin + np.asarray(local_vertex, dtype=float)
                     site_id = (
@@ -1432,7 +1473,7 @@ class StructureViewer(QWidget):
                         else ()
                     )
                     key = (*tuple(round(float(value), 5) for value in point), site_id)
-                    if key in seen_vertices:
+                    if key in seen_vertices or site_id in self.hidden_atom_orbit_ids:
                         continue
                     seen_vertices.add(key)
                     row = atom_rows.get(site_id)
@@ -1452,7 +1493,7 @@ class StructureViewer(QWidget):
             for color, instances in group_spheres_by_material(vertex_items).items():
                 mesh = build_sphere_batch(instances, detail)
                 if mesh is not None:
-                    self.plotter.add_mesh(mesh, color=color, smooth_shading=True)
+                    self.plotter.add_mesh(mesh, color=color, smooth_shading=True, opacity=context_opacity)
 
         for index, fragment in enumerate(scene.block_fragments):
             if fragment not in visible_fragments:
@@ -1475,7 +1516,7 @@ class StructureViewer(QWidget):
                 self.plotter.add_mesh(
                     mesh,
                     color=color,
-                    opacity=1.0,
+                    opacity=context_opacity,
                     show_edges=True,
                     edge_color="#000000",
                     line_width=1.2,
@@ -1517,7 +1558,7 @@ class StructureViewer(QWidget):
                         self.plotter.add_mesh(
                             batch,
                             color=atom_color,
-                            smooth_shading=True,
+                            smooth_shading=True, opacity=context_opacity,
                         )
 
         if layers.atoms:
@@ -1529,7 +1570,7 @@ class StructureViewer(QWidget):
                 for item in scene.polyhedra
             }
             for index, atom in enumerate(scene.atoms):
-                if atom not in atoms:
+                if (atom.atom_id, atom.cell_translation) not in visible_atom_lookup:
                     continue
                 row = atom_rows.get(atom.source_site_id)
                 color = self.atom_orbit_colors.get(
@@ -1550,49 +1591,118 @@ class StructureViewer(QWidget):
                 mesh = build_sphere_batch(instances, detail)
                 if mesh is not None:
                     _tag_pick_kind(mesh, PICK_ATOM)
-                    self.plotter.add_mesh(mesh, color=color, smooth_shading=True)
+                    self.plotter.add_mesh(mesh, color=color, smooth_shading=True, opacity=context_opacity)
+
+        if layer_mode:
+            from craft.ui.crystal_layer_rendering import draw_crystal_layers
+            draw_crystal_layers(self)
+
+        if getattr(self, "show_labels", False):
+            labels = []
+            points = []
+            if layer_mode:
+                for layer in display_layers:
+                    style = self.crystal_layers.get(layer.key)
+                    if style is None or not style.visible:
+                        continue
+                    vertices = [point for point, _composition in layer.atoms]
+                    vertices.extend(point for polyhedron in layer.polyhedra for point in polyhedron.points)
+                    vertices.extend(point for segment in layer.segments for point in segment)
+                    if vertices:
+                        points.append(tuple(np.mean(np.asarray(vertices), axis=0)))
+                        labels.append(layer.label)
+            elif layers.atoms:
+                for atom in atoms:
+                    row = atom_rows.get(atom.source_site_id)
+                    points.append(atom.cartesian)
+                    labels.append(getattr(row, "label", atom.source_site_id))
+            elif layers.polyhedra:
+                for mesh in scene.polyhedra:
+                    center = atom_lookup.get((mesh.center_atom_id, mesh.center_translation))
+                    if mesh in visible_meshes and center is not None:
+                        row = poly_rows.get(mesh.polyhedron_orbit_id)
+                        points.append(center.cartesian)
+                        labels.append(getattr(row, "label", mesh.polyhedron_orbit_id))
+            elif layers.blocks:
+                for fragment in scene.block_fragments:
+                    vertices = (*fragment.points, *fragment.isolated_points)
+                    if fragment in visible_fragments and vertices:
+                        row = block_rows.get(fragment.block_id)
+                        points.append(tuple(np.mean(np.asarray(vertices), axis=0)))
+                        labels.append(getattr(row, "label", fragment.block_id))
+            if points:
+                self.plotter.add_point_labels(points, labels, text_color="#172033", font_size=12,
+                                             point_size=0, shape_opacity=0.0, always_visible=False)
 
         if self.show_legend:
-            entries: dict[str, str] = {}
+            from craft.ui.chemical_legend import draw_chemical_legend, polyhedron_legend_glyph
+
+            legend_items = []
+            legend_glyphs = {}
+
+            def legend_item(label, color, identifier, points=(), faces=()):
+                item = (label, color, identifier)
+                legend_items.append(item)
+                if faces:
+                    glyph = polyhedron_legend_glyph(points, faces)
+                    if glyph is not None:
+                        legend_glyphs[item] = glyph
+
+            if layer_mode:
+                for layer_number, layer in enumerate(display_layers, 1):
+                    style = self.crystal_layers.get(layer.key)
+                    if style is not None and style.visible:
+                        points, faces = [], []
+                        for poly in layer.polyhedra[:1 if layer.priority >= 2 else 12]:
+                            faces.extend(tuple(vertex + len(points) for vertex in face)
+                                         for face in poly.faces)
+                            points.extend(poly.points)
+                        color = (self.atom_orbit_colors.get(layer.atoms[0][1], style.color)
+                                 if layer.atoms else style.color)
+                        legend_item(layer.label, color, f"Layer {layer_number}", points, faces)
             if layers.atoms:
                 visible_sites = {atom.source_site_id for atom in atoms}
                 if layers.polyhedra:
                     covered_sites = {
-                        atom.source_site_id
-                        for atom in scene.atoms
-                        if (atom.atom_id, atom.cell_translation)
-                        in visible_polyhedron_centers
+                        atom.source_site_id for atom in scene.atoms
+                        if (atom.atom_id, atom.cell_translation) in visible_polyhedron_centers
                     }
-                    covered_sites.update(
-                        site_id
-                        for item in visible_meshes
-                        for site_id in item.vertex_source_site_ids
-                        if site_id
-                    )
-                    visible_sites -= covered_sites
+                    covered_sites.update(site_id for mesh in visible_meshes
+                                         for site_id in mesh.vertex_source_site_ids if site_id)
+                    # Keep the compact chemical legend while explaining explicit
+                    # atom colours that differ inside the polyhedral figure.
+                    visible_sites -= covered_sites - self.atom_orbit_colors.keys()
                 for row in presentation.atom_orbits:
                     if row.source_site_id in visible_sites:
-                        entries.setdefault(
+                        legend_items.append((
                             row.composition_label,
                             self.atom_orbit_colors.get(row.source_site_id, row.default_color),
-                        )
+                            getattr(row, "label", row.source_site_id),
+                        ))
             if layers.polyhedra:
                 visible_orbits = {
                     item.polyhedron_orbit_id
-                    for item in visible_native_polyhedra(scene, self)
+                    for item in visible_meshes
                 }
                 for row in presentation.polyhedron_orbits:
                     if row.polyhedron_orbit_id in visible_orbits:
-                        entries.setdefault(
+                        mesh = next(mesh for mesh in scene.polyhedra
+                                    if mesh in visible_meshes and mesh.polyhedron_orbit_id == row.polyhedron_orbit_id)
+                        legend_item(
                             row.label.rsplit(" — ", 1)[-1],
                             self.polyhedron_orbit_colors.get(
                                 row.polyhedron_orbit_id, row.default_color
                             ),
+                            row.label.split(" — ", 1)[0],
+                            mesh.local_vertices,
+                            mesh.faces or (tuple(range(len(mesh.local_vertices))),),
                         )
-            for fragment in visible_fragments:
+            for fragment in scene.block_fragments:
+                if fragment not in visible_fragments:
+                    continue
                 row = block_rows.get(fragment.block_id)
                 if row is not None:
-                    entries.setdefault(
+                    legend_item(
                         row.classification.replace("_", " "),
                         self.block_colors.get(
                             fragment.block_id,
@@ -1601,20 +1711,15 @@ class StructureViewer(QWidget):
                                 % len(_TOPOLOGY_COLORS)
                             ],
                         ),
+                        f"Block {scene.block_fragments.index(fragment) + 1}",
+                        fragment.points, fragment.faces,
                     )
-            if entries:
-                self.plotter.add_legend(
-                    sorted(entries.items()),
-                    bcolor="#ffffff",
-                    border=False,
-                    face="circle",
-                    loc="lower right",
-                    size=(0.17, min(0.038 * len(entries) + 0.025, 0.20)),
-                    background_opacity=0.76,
-                )
+            draw_chemical_legend(self, legend_items, legend_glyphs)
 
         if self.show_axes:
             self.plotter.add_axes(
+                viewport=compass_viewport(self),
+                interactive=False,
                 line_width=5,
                 x_color="#e74c3c",
                 y_color="#20b96b",
@@ -1682,7 +1787,7 @@ class StructureViewer(QWidget):
                     name="native-topology:cell",
                 )
 
-        legend: dict[str, str] = {}
+        legend = []
         edge_index = 0
         for first_index, first_mesh in enumerate(polyhedra):
             if first_mesh.polyhedron_id not in centers:
@@ -1723,7 +1828,7 @@ class StructureViewer(QWidget):
                         f"{second_mesh.polyhedron_id}"
                     ),
                 )
-                legend.setdefault(kind, color)
+                legend.append((kind, color, kind))
                 edge_index += 1
 
         label_points: list[tuple[float, float, float]] = []
@@ -1763,9 +1868,9 @@ class StructureViewer(QWidget):
                 smooth_shading=True,
                 name=f"native-topology:node:{polyhedron_mesh.polyhedron_id}",
             )
-            legend.setdefault(node_label, color)
+            legend.append((node_label, color, polyhedron.label.split(" — ", 1)[0] if polyhedron is not None else node_label))
             label_points.append(tuple(float(value) for value in point))
-            label_text.append(node_label)
+            label_text.append(polyhedron.label if polyhedron is not None else node_label)
         if getattr(self, "show_labels", False):
             self.plotter.add_point_labels(
                 label_points,
@@ -1777,16 +1882,12 @@ class StructureViewer(QWidget):
                 always_visible=True,
             )
         if self.show_legend and legend:
-            self.plotter.add_legend(
-                sorted(legend.items()),
-                bcolor="#ffffff",
-                border=False,
-                face="circle",
-                loc="lower right",
-                background_opacity=0.76,
-            )
+            from craft.ui.chemical_legend import draw_chemical_legend
+            draw_chemical_legend(self, legend)
         if self.show_axes:
             self.plotter.add_axes(
+                viewport=compass_viewport(self),
+                interactive=False,
                 line_width=5,
                 x_color="#e74c3c",
                 y_color="#20b96b",
@@ -1967,23 +2068,31 @@ class StructureViewer(QWidget):
                         smooth_shading=True,
                     )
 
+        site_labels = {
+            site.id: site.label for site in getattr(getattr(self, "structure", None), "sites", ())
+            if hasattr(site, "id")
+        }
+        if getattr(self, "show_labels", False) and self.show_atoms and visible_atoms:
+            self.plotter.add_point_labels(
+                [atom.cartesian for atom in visible_atoms],
+                [site_labels.get(atom.source_site_id, atom.element) for atom in visible_atoms],
+                text_color="#172033", font_size=12, point_size=0,
+                shape_opacity=0.0, always_visible=False,
+            )
         if self.show_legend and self.show_atoms:
-            entries = {
-                atom.element: atom_colours[(atom.atom_id, atom.cell_translation)]
+            entries = tuple(
+                (atom.element, atom_colours[(atom.atom_id, atom.cell_translation)],
+                 site_labels.get(atom.source_site_id, atom.source_site_id))
                 for atom in visible_atoms
-            }
+            )
             if entries:
-                self.plotter.add_legend(
-                    sorted(entries.items()),
-                    bcolor="#ffffff",
-                    border=False,
-                    face="circle",
-                    loc="lower right",
-                    background_opacity=0.76,
-                )
+                from craft.ui.chemical_legend import draw_chemical_legend
+                draw_chemical_legend(self, entries)
 
         if self.show_axes:
             self.plotter.add_axes(
+                viewport=compass_viewport(self),
+                interactive=False,
                 line_width=5,
                 x_color="#e74c3c",
                 y_color="#20b96b",
@@ -2202,15 +2311,19 @@ class StructureViewer(QWidget):
             entries = [("Rigid block", "#20242a"), ("Shared-site connection", "#697586")]
         if not entries:
             return
-        self.plotter.add_legend(
+        scale = getattr(self, "legend_scale", 1.)
+        bottom = compass_viewport(self)[3] + .015 if getattr(self, "show_axes", False) else .015
+        actor = self.plotter.add_legend(
             entries,
             bcolor="#ffffff",
             border=False,
             face="circle",
-            loc="lower right",
-            size=(0.16, min(0.038 * len(entries) + 0.025, 0.20)),
+            loc="lower left",
+            size=(0.16 * scale, min((0.038 * len(entries) + 0.025) * scale, .98 - bottom)),
             background_opacity=0.76,
         )
+        if actor is not None:
+            actor.SetPosition(.015, bottom)
 
     @staticmethod
     def _subscript_formula(text: str) -> str:
@@ -2353,7 +2466,9 @@ class StructureViewer(QWidget):
 
         polyhedra = {item.id: item for item in self.hierarchy.polyhedra}
         ordered = sorted(entries, key=lambda item: item[1])
-        row_height = min(0.082, 0.30 / max(len(ordered), 1))
+        scale = getattr(self, "legend_scale", 1.)
+        start = compass_viewport(self)[3] + .015 if getattr(self, "show_axes", False) else .015
+        row_height = min(0.082 * scale, (.98 - start) / max(len(ordered), 1))
         for row, (kind, name, color, payload) in enumerate(ordered):
             assembly = vtkAssembly()
             if kind == "atom":
@@ -2395,12 +2510,12 @@ class StructureViewer(QWidget):
                     actor.SetPosition(*offsets[index])
                     assembly.AddPart(actor)
 
-            bottom = 0.035 + row * row_height
+            bottom = start + row * row_height
             widget = vtkOrientationMarkerWidget()
             widget.SetOrientationMarker(assembly)
             widget.SetInteractor(self.plotter.iren.interactor)
             widget.SetCurrentRenderer(self.plotter.renderer)
-            widget.SetViewport(0.735, bottom, 0.805, bottom + row_height * 0.92)
+            widget.SetViewport(.015, bottom, .015 + .07 * scale, bottom + row_height * 0.92)
             widget.SetEnabled(1)
             widget.SetInteractive(0)
             self._polyhedron_legend_widgets.append(widget)
@@ -2408,9 +2523,9 @@ class StructureViewer(QWidget):
             label = vtkTextActor()
             label.SetInput(name)
             label.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
-            label.SetPosition(0.812, bottom + row_height * 0.30)
+            label.SetPosition(.015 + .077 * scale, bottom + row_height * 0.30)
             label.GetTextProperty().SetColor(pv.Color(_shade(color, 0.72)).float_rgb)
-            label.GetTextProperty().SetFontSize(13)
+            label.GetTextProperty().SetFontSize(round(13 * scale))
             label.GetTextProperty().BoldOn()
             label.GetTextProperty().SetBackgroundColor(1.0, 1.0, 1.0)
             label.GetTextProperty().SetBackgroundOpacity(0.68)
@@ -2432,7 +2547,9 @@ class StructureViewer(QWidget):
         if not entries or self.plotter.iren is None:
             return
         ordered_entries = sorted(entries.items())
-        row_height = min(0.085, 0.25 / max(len(ordered_entries), 1))
+        scale = getattr(self, "legend_scale", 1.)
+        start = compass_viewport(self)[3] + .015 if getattr(self, "show_axes", False) else .015
+        row_height = min(.085 * scale, (.98 - start) / max(len(ordered_entries), 1))
         for row, (name, (color, polyhedron)) in enumerate(ordered_entries):
             assembly = vtkAssembly()
             surface, vertices = self._legend_polyhedron_geometry(polyhedron)
@@ -2450,12 +2567,12 @@ class StructureViewer(QWidget):
                 vertex_actor.SetPosition(*(vertex * 0.72))
                 assembly.AddPart(vertex_actor)
 
-            bottom = 0.035 + row * row_height
+            bottom = start + row * row_height
             widget = vtkOrientationMarkerWidget()
             widget.SetOrientationMarker(assembly)
             widget.SetInteractor(self.plotter.iren.interactor)
             widget.SetCurrentRenderer(self.plotter.renderer)
-            widget.SetViewport(0.745, bottom, 0.805, bottom + row_height * 0.92)
+            widget.SetViewport(.015, bottom, .015 + .07 * scale, bottom + row_height * 0.92)
             widget.SetEnabled(1)
             widget.SetInteractive(0)
             self._polyhedron_legend_widgets.append(widget)
@@ -2465,9 +2582,9 @@ class StructureViewer(QWidget):
             label = vtkTextActor()
             label.SetInput(self._subscript_formula(name))
             label.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
-            label.SetPosition(0.812, bottom + row_height * 0.30)
+            label.SetPosition(.015 + .077 * scale, bottom + row_height * 0.30)
             label.GetTextProperty().SetColor(pv.Color(_shade(color, 0.72)).float_rgb)
-            label.GetTextProperty().SetFontSize(13)
+            label.GetTextProperty().SetFontSize(round(13 * scale))
             label.GetTextProperty().BoldOn()
             label.GetTextProperty().SetBackgroundColor(1.0, 1.0, 1.0)
             label.GetTextProperty().SetBackgroundOpacity(0.68)
@@ -2475,12 +2592,16 @@ class StructureViewer(QWidget):
             self._polyhedron_legend_labels.append(label)
 
     def _remove_polyhedron_legend(self) -> None:
+        overlay = getattr(self, "_chemical_legend_overlay", None)
+        if overlay is not None:
+            overlay.close()
+            self._chemical_legend_overlay = None
         for widget in self._polyhedron_legend_widgets:
             widget.SetEnabled(0)
             widget.SetInteractor(None)
         self._polyhedron_legend_widgets.clear()
         for label in self._polyhedron_legend_labels:
-            self.plotter.renderer.RemoveActor2D(label)
+            self.plotter.renderer.RemoveViewProp(label)
         self._polyhedron_legend_labels.clear()
 
     def _resolved_color_mode(self, default: str) -> str:
@@ -4266,12 +4387,12 @@ class StructureViewer(QWidget):
                     )
 
     def view_axis(self, axis: str) -> None:
-        {"a": self.plotter.view_yz, "b": self.plotter.view_xz, "c": self.plotter.view_xy}[axis]()
-        self.plotter.reset_camera()
+        cell = getattr(self.structure, 'cell', None)
+        if cell is not None:
+            view_lattice_axis(self.plotter, cell, axis)
 
     def zoom(self, factor: float) -> None:
-        self.plotter.camera.zoom(factor)
-        self.plotter.render()
+        zoom_view(self.plotter, factor)
 
     def save_screenshot(self, path: str) -> None:
         self.plotter.screenshot(path)

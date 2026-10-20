@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QBrush
-from PySide6.QtWidgets import QListWidget, QListWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QListWidget, QListWidgetItem, QTextBrowser, QVBoxLayout, QWidget
 
 from craft.analysis.reporting import (
     ReportDraft,
@@ -23,9 +23,15 @@ class ReportPreview(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.list = QListWidget()
         self.list.itemDoubleClicked.connect(self._activate)
+        self.list.setMaximumHeight(120)
         layout.addWidget(self.list)
+        self.content = QTextBrowser()
+        self.content.setOpenExternalLinks(False)
+        layout.addWidget(self.content, 1)
 
     def set_draft(self, draft: ReportDraft, report=None) -> None:
+        from craft.analysis.reporting.automatic import render_report_html
+        self.content.setHtml(render_report_html(draft, report))
         self.list.clear()
         for numbered in numbered_tables(draft):
             self._add(

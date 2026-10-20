@@ -7,7 +7,7 @@ from craft import __version__
 from craft.analysis.hierarchy import HierarchyReport
 from craft.analysis.reporting.catalog import TABLE_DEFINITIONS, table_definition
 from craft.analysis.reporting.crystal import (
-    build_adp_table,
+    build_anisotropic_table,
     build_atomic_sites_table,
     build_crystal_data_table,
     build_refinement_table,
@@ -38,7 +38,7 @@ BUILDERS: dict[str, TableBuilder] = {
     "crystal_data": build_crystal_data_table,
     "refinement": build_refinement_table,
     "atomic_sites": build_atomic_sites_table,
-    "adp": build_adp_table,
+    "anisotropic_adp": build_anisotropic_table,
 }
 
 
@@ -64,7 +64,14 @@ class StructureReportBuilder:
             return self._cache[table_id]
         definition = table_definition(table_id)
         builder = BUILDERS.get(table_id)
-        if table_id in ORGANIC_TABLE_IDS and self.organic_presentation is not None:
+        if table_id == "inorganic_classification":
+            from craft.analysis.reporting.inorganic_classification import build_classification_table
+            table = build_classification_table(self.inorganic_document)
+        elif table_id in {"coordination", "connectivity"}:
+            from craft.analysis.reporting.inorganic_geometry import build_coordination_table, build_connectivity_table
+            table = (build_coordination_table(self.inorganic_document) if table_id == "coordination"
+                     else build_connectivity_table(self.inorganic_document))
+        elif table_id in ORGANIC_TABLE_IDS and self.organic_presentation is not None:
             table = build_organic_table(table_id, self.organic_presentation)
         elif table_id in {"bond_lengths", "bond_angles"}:
             geometry_settings = GeometrySettings(
@@ -101,7 +108,7 @@ class StructureReportBuilder:
                 columns=(),
                 rows=(),
                 availability=Availability.UNAVAILABLE,
-                unavailable_reason=f"Available in Stage {definition.stage}: {definition.title}",
+                unavailable_reason=f"{definition.title} data are not available for this structure.",
             )
         else:
             table = builder(self.structure)

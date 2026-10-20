@@ -5,10 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import product
 from math import ceil, floor
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from cristma.crystal_chemistry import CellRange
+
+if TYPE_CHECKING:
+    from craft.presentation.crystal_layers import CrystalLayerGeometry
 
 
 Point = tuple[float, float, float]
@@ -89,14 +93,14 @@ class InorganicSceneData:
     expanded_grid_edges: tuple[Edge, ...]
     bounds: tuple[tuple[float, float], ...]
     structural_units: tuple[StructuralUnitSceneInstance, ...] = ()
+    crystal_layers: tuple[CrystalLayerGeometry, ...] = ()
 
 
-def visible_atoms(scene: InorganicSceneData, state) -> tuple[AtomSceneInstance, ...]:
+def visible_atoms(scene: InorganicSceneData, state, *, include_auto_hidden: bool = True) -> tuple[AtomSceneInstance, ...]:
+    from craft.presentation.block_state import auto_hidden_members
     hidden_orbits = getattr(state, "hidden_atom_orbit_ids", set())
     hidden_instances = getattr(state, "hidden_atom_instance_keys", set())
-    auto_hidden = set().union(
-        *getattr(state, "block_auto_hidden_atom_ids", {}).values()
-    ) if getattr(state, "block_auto_hidden_atom_ids", {}) else set()
+    auto_hidden = auto_hidden_members(state, "block_auto_hidden_atom_ids") if include_auto_hidden else ()
     return tuple(
         atom
         for atom in scene.atoms
@@ -106,12 +110,11 @@ def visible_atoms(scene: InorganicSceneData, state) -> tuple[AtomSceneInstance, 
     )
 
 
-def visible_polyhedra(scene: InorganicSceneData, state) -> tuple[PolyhedronMesh, ...]:
+def visible_polyhedra(scene: InorganicSceneData, state, *, include_auto_hidden: bool = True) -> tuple[PolyhedronMesh, ...]:
+    from craft.presentation.block_state import auto_hidden_members
     hidden_orbits = getattr(state, "hidden_polyhedron_orbit_ids", set())
     hidden_instances = getattr(state, "hidden_polyhedron_ids", set())
-    auto_hidden = set().union(
-        *getattr(state, "block_auto_hidden_polyhedron_orbit_ids", {}).values()
-    ) if getattr(state, "block_auto_hidden_polyhedron_orbit_ids", {}) else set()
+    auto_hidden = auto_hidden_members(state, "block_auto_hidden_polyhedron_orbit_ids") if include_auto_hidden else ()
     return tuple(
         mesh
         for mesh in scene.polyhedra

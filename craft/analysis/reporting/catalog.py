@@ -21,15 +21,16 @@ class ReportPreset:
 
 TABLE_DEFINITIONS = (
     TableDefinition("crystal_data", "Crystal data", "Crystal and refinement", "A"),
-    TableDefinition("refinement", "Data collection and refinement", "Crystal and refinement", "A"),
-    TableDefinition("atomic_sites", "Atomic sites", "Atoms and displacement", "A"),
-    TableDefinition("adp", "Atomic displacement parameters", "Atoms and displacement", "A"),
+    TableDefinition("refinement", "Experiment and refinement", "Crystal and refinement", "A"),
+    TableDefinition("atomic_sites", "Coordinates and Uiso/Ueq", "Atoms and displacement", "A"),
+    TableDefinition("anisotropic_adp", "Anisotropic ADP (Uij/Bij)", "Atoms and displacement", "A"),
     TableDefinition("bond_lengths", "Bond lengths", "Geometry", "A"),
     TableDefinition("bond_angles", "Bond angles", "Geometry", "A"),
     TableDefinition("torsion_angles", "Torsion angles", "Geometry", "D"),
     TableDefinition("contacts", "Non-bonded contacts", "Geometry", "D"),
     TableDefinition("hydrogen_bonds", "Hydrogen bonds", "Geometry", "D"),
     TableDefinition("coordination", "Coordination environments", "Inorganic geometry", "B"),
+    TableDefinition("inorganic_classification", "Inorganic compound classes", "Inorganic geometry", "B"),
     TableDefinition("polyhedra", "Polyhedral metrics", "Inorganic geometry", "B"),
     TableDefinition("connectivity", "Polyhedral connectivity", "Inorganic geometry", "B"),
     TableDefinition("bond_valence", "Bond-valence analysis", "Inorganic geometry", "B"),
@@ -53,11 +54,12 @@ STANDARD = (
     "crystal_data",
     "refinement",
     "atomic_sites",
-    "adp",
+    "anisotropic_adp",
     "bond_lengths",
     "bond_angles",
 )
-INORGANIC = STANDARD + ("coordination", "polyhedra", "connectivity", "bond_valence")
+INORGANIC = STANDARD + ("inorganic_classification", "coordination", "polyhedra", "connectivity", "bond_valence")
+ARTICLE_TABLE_IDS = frozenset(STANDARD + ("bond_valence", "polyhedra", "hydrogen_bonds"))
 MECHANICS = ("structural_units", "rigid_blocks", "connectors", "degrees_of_freedom")
 ORGANIC_MOF = (
     "crystal_data",

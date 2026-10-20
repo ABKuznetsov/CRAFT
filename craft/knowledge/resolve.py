@@ -144,8 +144,15 @@ def set_manual_changes(
     state.manual = InterpretationOverlay(domain_id, changes, "manual")
 
 
-def remove_overlay(document) -> None:
-    document.knowledge_state = DocumentKnowledgeState()
+def remove_overlay(document, *, domain_id: str | None = None) -> None:
+    if domain_id is None:
+        document.knowledge_state = DocumentKnowledgeState()
+        return
+    state = _state(document)
+    if state.manual is not None and state.manual.domain_id == domain_id:
+        state.manual = None
+    if state.accepted is not None and state.accepted.domain_id == domain_id:
+        state.accepted = None
 
 
 def confirm_bond_changes(

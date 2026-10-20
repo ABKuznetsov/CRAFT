@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from craft.analysis.reporting.model import (
+    Availability,
     Provenance,
     ReportCell,
     ReportColumn,
@@ -33,6 +34,8 @@ def _table(table_id: str, title: str, columns: tuple[tuple[str, str], ...], rows
         title=title,
         columns=tuple(ReportColumn(column_id, label) for column_id, label in columns),
         rows=tuple(rows),
+        availability=Availability.AVAILABLE if rows else Availability.UNAVAILABLE,
+        unavailable_reason="" if rows else "No results of this type are available for this structure.",
         method="CrIStMa native orbit results",
     )
 

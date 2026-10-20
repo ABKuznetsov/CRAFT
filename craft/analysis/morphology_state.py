@@ -29,15 +29,18 @@ FORMAT_VERSION = 2
 
 @dataclass(frozen=True, slots=True)
 class SelectionPolicy:
-    kind: str = "area_coverage"
-    target: float = 0.80
+    kind: str = "all_forms"
+    target: float = 1.0
     revision: int = 1
 
     def __post_init__(self) -> None:
-        if self.kind != "area_coverage":
+        # Read the historical policy without applying its automatic area crop.
+        if self.kind not in {"all_forms", "area_coverage"}:
             raise ValueError("Unsupported morphology selection policy.")
         if not math.isfinite(float(self.target)) or not 0.0 < float(self.target) <= 1.0:
             raise ValueError("Selection-policy target must be finite and in (0, 1].")
+        if self.kind == "all_forms" and float(self.target) != 1.0:
+            raise ValueError("All-forms selection requires a target of 1.")
         if int(self.revision) != 1:
             raise ValueError("Unsupported morphology selection-policy revision.")
 
@@ -83,27 +86,46 @@ class MorphologyEditState:
         target = reduce_hkl(hkl)
         return next((item for item in self.overrides if item.hkl == target), None)
 
-    def _replace_override(self, override: PlaneOverride) -> MorphologyEditState:
-        retained = [item for item in self.overrides if item.hkl != override.hkl]
+    def _family_override(self, hkl, equivalents=()) -> PlaneOverride:
+        target = reduce_hkl(hkl)
+        members = {target, *(reduce_hkl(value) for value in equivalents)}
+        current = self.override_for(target) or PlaneOverride(target)
+        for item in self.overrides:
+            if item.hkl in members:
+                current = replace(
+                    current,
+                    rho=current.rho if current.rho is not None else item.rho,
+                    enabled=current.enabled if current.enabled is not None else item.enabled,
+                    user_added=current.user_added or item.user_added,
+                )
+        return current
+
+    def _replace_override(self, override: PlaneOverride, equivalents=()) -> MorphologyEditState:
+        members = {override.hkl, *(reduce_hkl(value) for value in equivalents)}
+        retained = [item for item in self.overrides if item.hkl not in members]
         retained.append(override)
         return replace(self, overrides=tuple(sorted(retained, key=lambda item: item.hkl)))
 
-    def with_distance(self, hkl, rho: float) -> MorphologyEditState:
+    def with_distance(self, hkl, rho: float, *, equivalents=()) -> MorphologyEditState:
         value = float(rho)
         if not math.isfinite(value) or value <= 0.0:
             raise ValueError("Centre-to-plane distance must be finite and positive.")
         target = reduce_hkl(hkl)
-        current = self.override_for(target) or PlaneOverride(target)
-        return self._replace_override(replace(current, rho=value))
+        current = self._family_override(target, equivalents)
+        return self._replace_override(replace(current, rho=value), equivalents)
 
-    def with_enabled(self, hkl, enabled: bool) -> MorphologyEditState:
+    def with_enabled(self, hkl, enabled: bool, *, equivalents=()) -> MorphologyEditState:
         target = reduce_hkl(hkl)
-        current = self.override_for(target) or PlaneOverride(target)
-        return self._replace_override(replace(current, enabled=bool(enabled)))
+        current = self._family_override(target, equivalents)
+        return self._replace_override(replace(current, enabled=bool(enabled)), equivalents)
 
-    def reset_family(self, hkl) -> MorphologyEditState:
+    def reset_family(self, hkl, *, equivalents=()) -> MorphologyEditState:
         target = reduce_hkl(hkl)
-        return replace(self, overrides=tuple(item for item in self.overrides if item.hkl != target))
+        current = self._family_override(target, equivalents)
+        if current.user_added:
+            return self._replace_override(replace(current, rho=None, enabled=True), equivalents)
+        members = {target, *(reduce_hkl(value) for value in equivalents)}
+        return replace(self, overrides=tuple(item for item in self.overrides if item.hkl not in members))
 
     def reset_all(self) -> MorphologyEditState:
         return replace(self, overrides=())
@@ -135,7 +157,7 @@ class MorphologyEditState:
             raise ValueError("Only a user-added family can be removed.")
         return replace(
             self,
-            overrides=tuple(item for item in self.overrides if item.hkl not in removable),
+            overrides=tuple(item for item in self.overrides if item.hkl not in targets),
             markings=tuple(item for item in self.markings if item.target_family not in targets),
         )
 
@@ -167,13 +189,14 @@ class LoadedMorphologyState:
     message: str = ""
 
 
-def initialize_primary_selection(state: MorphologyEditState, selection) -> MorphologyEditState:
-    if state.primary_initialized:
-        return state
+def initialize_bfdh_forms(
+    state: MorphologyEditState, planes: tuple[MorphologyPlane, ...],
+) -> MorphologyEditState:
+    """Refresh full BFDH metadata while retaining explicit manual overrides."""
     return replace(
         state,
-        selection_policy=SelectionPolicy(target=0.80),
-        primary_families=tuple(selection.active_families),
+        selection_policy=SelectionPolicy(),
+        primary_families=tuple(plane.family.hkl for plane in planes),
         primary_initialized=True,
     )
 
@@ -194,11 +217,9 @@ def apply_edit_state(
             ),
             None,
         )
-        default_enabled = (
-            plane.family.hkl in state.primary_families
-            if state.primary_initialized
-            else plane.enabled
-        )
+        # Only explicit edits may disable a calculated BFDH form. Historical
+        # primary_families lists describe an automatic crop, not a manual edit.
+        default_enabled = plane.enabled
         if override is None:
             result.append(replace(plane, enabled=default_enabled))
             continue
@@ -370,8 +391,8 @@ def load_morphology_state(
     else:
         raw_policy = payload.get("selection_policy", {})
         policy = SelectionPolicy(
-            str(raw_policy.get("kind", "area_coverage")),
-            float(raw_policy.get("target", 0.80)),
+            str(raw_policy.get("kind", "all_forms")),
+            float(raw_policy.get("target", 1.0)),
             int(raw_policy.get("revision", 1)),
         )
         primary_families = tuple(
@@ -414,7 +435,7 @@ __all__ = [
     "PlaneOverride",
     "SelectionPolicy",
     "apply_edit_state",
-    "initialize_primary_selection",
+    "initialize_bfdh_forms",
     "load_morphology_state",
     "save_morphology_state",
     "source_identity",

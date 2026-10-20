@@ -20,7 +20,7 @@ export MPLCONFIGDIR="$SCI_ROOT/apps/craft/matplotlib"
 mkdir -p "$MPLCONFIGDIR"
 ENV_READY=0
 if [ -x "$SCI_ENV/bin/python" ]; then
-  PYTHONPATH="$APP_ROOT" "$SCI_ENV/bin/python" -c 'import sys, cristma, craft, PySide6, pyvista, pyvistaqt, vtk; raise SystemExit(0 if cristma.__version__ == sys.argv[1] else 1)' "$CRISTMA_VERSION" >/dev/null 2>&1 && ENV_READY=1
+  PYTHONPATH="$APP_ROOT" "$SCI_ENV/bin/python" -c 'import sys, cristma, craft, PySide6, pyvista, pyvistaqt, vtk, docx; raise SystemExit(0 if cristma.__version__ == sys.argv[1] else 1)' "$CRISTMA_VERSION" >/dev/null 2>&1 && ENV_READY=1
 fi
 if [ "$ENV_READY" -ne 1 ]; then
   "$APP_ROOT/toolkit/setup_craft_env.command"

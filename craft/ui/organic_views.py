@@ -5,6 +5,7 @@ from enum import StrEnum
 from html import escape
 
 from craft.core.document import StructureDocument
+from craft.presentation.organic_scene import OrganicSceneMode
 
 
 class OrganicViewKind(StrEnum):
@@ -27,6 +28,19 @@ class OrganicViewDescriptor:
     label: str
     ready: bool
     object_count: int | None
+
+
+def organic_scene_mode(category: str | None) -> OrganicSceneMode:
+    """Use the same view mapping for a user command and a scene rebuild."""
+    return {
+        OrganicViewKind.CONTACTS: OrganicSceneMode.CONTACTS,
+        OrganicViewKind.RINGS: OrganicSceneMode.RING,
+        OrganicViewKind.COORDINATION_FRAGMENT: OrganicSceneMode.SBU,
+        OrganicViewKind.NODES_SBUS: OrganicSceneMode.SBU,
+        OrganicViewKind.LINKERS: OrganicSceneMode.LINKER,
+        OrganicViewKind.PERIODIC_NETWORK: OrganicSceneMode.NET,
+        OrganicViewKind.PACKING: OrganicSceneMode.PACKING,
+    }.get(category, OrganicSceneMode.SINGLE_MOLECULE)
 
 
 def default_organic_view(document: StructureDocument) -> OrganicViewKind:
@@ -139,4 +153,5 @@ __all__ = [
     "default_organic_view",
     "organic_analysis_summary",
     "organic_view_descriptors",
+    "organic_scene_mode",
 ]

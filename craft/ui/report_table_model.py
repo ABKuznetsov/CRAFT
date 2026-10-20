@@ -58,7 +58,8 @@ class ReportTableModel(QAbstractTableModel):
             or role != Qt.ItemDataRole.CheckStateRole
         ):
             return False
-        included = value == Qt.CheckState.Checked
+        raw_value = getattr(value, "value", value)
+        included = raw_value == Qt.CheckState.Checked.value
         self.rows[index.row()] = replace(
             self.rows[index.row()], include_in_publication=included
         )

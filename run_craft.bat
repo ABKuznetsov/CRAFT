@@ -14,11 +14,11 @@ if not exist "%SCI_PYTHON%" (
     if errorlevel 1 exit /b 1
 )
 
-"%SCI_PYTHON%" -c "import cristma, sys; raise SystemExit(0 if cristma.__version__ == sys.argv[1] else 1)" "%CRISTMA_VERSION%" >nul 2>&1
+"%SCI_PYTHON%" -c "import cristma, sys, docx; raise SystemExit(0 if cristma.__version__ == sys.argv[1] else 1)" "%CRISTMA_VERSION%" >nul 2>&1
 if errorlevel 1 (
     call "%APP_ROOT%toolkit\setup_sci_env.bat"
     if errorlevel 1 exit /b 1
-    "%SCI_PYTHON%" -c "import cristma, sys; raise SystemExit(0 if cristma.__version__ == sys.argv[1] else 1)" "%CRISTMA_VERSION%" >nul 2>&1
+    "%SCI_PYTHON%" -c "import cristma, sys, docx; raise SystemExit(0 if cristma.__version__ == sys.argv[1] else 1)" "%CRISTMA_VERSION%" >nul 2>&1
     if errorlevel 1 (
         echo CRiStMa %CRISTMA_VERSION% is missing from the shared Python environment.
         exit /b 1

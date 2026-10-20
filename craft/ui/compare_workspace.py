@@ -187,13 +187,19 @@ class CompareWorkspace(QWidget):
         splitter.setSizes((900, 300))
         root.addWidget(splitter, 1)
 
+    def _set_table_model(self, model) -> None:
+        previous = self.table.model()
+        self.table.setModel(model)
+        if previous is not None and previous is not model:
+            previous.deleteLater()
+
     def set_report(self, report: ComparisonReport) -> None:
         if len(report.document_ids) != 2:
             raise ValueError("Comparison workspace requires exactly two structures; four or more are not supported.")
         self.report = report
         model = CompareTableModel(report, self)
         model.set_show_differences_only(self.differences_only.isChecked())
-        self.table.setModel(model)
+        self._set_table_model(model)
         self.table.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         for column in range(1, model.columnCount()):
             self.table.header().setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
@@ -210,7 +216,7 @@ class CompareWorkspace(QWidget):
 
     def set_loading(self, text: str = "Comparing structures…") -> None:
         self.report = None
-        self.table.setModel(None)
+        self._set_table_model(None)
         self.summary_label.setText(text)
         self.detail.setPlainText(text)
         self.set_status(text)

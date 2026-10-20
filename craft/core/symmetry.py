@@ -1,19 +1,10 @@
 from __future__ import annotations
 
 import ast
-import operator
 from dataclasses import dataclass
 from fractions import Fraction
 
 import numpy as np
-
-_BINARY = {
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-}
-_UNARY = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +22,7 @@ def _linear_expression(node: ast.AST) -> tuple[tuple[Fraction, Fraction, Fractio
         coefficients = [Fraction(0), Fraction(0), Fraction(0)]
         coefficients[("x", "y", "z").index(node.id)] = Fraction(1)
         return tuple(coefficients), Fraction(0)
-    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY:
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
         coefficients, constant = _linear_expression(node.operand)
         sign = Fraction(1) if isinstance(node.op, ast.UAdd) else Fraction(-1)
         return tuple(sign * value for value in coefficients), sign * constant
@@ -88,30 +79,3 @@ def parse_affine_operation(operation: str) -> AffineSymmetry:
     rotation.setflags(write=False)
     translation.setflags(write=False)
     return AffineSymmetry(rotation, translation)
-
-
-def _evaluate(node: ast.AST, variables: dict[str, float]) -> float:
-    if isinstance(node, ast.Expression):
-        return _evaluate(node.body, variables)
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-        return float(node.value)
-    if isinstance(node, ast.Name) and node.id in variables:
-        return variables[node.id]
-    if isinstance(node, ast.BinOp) and type(node.op) in _BINARY:
-        return _BINARY[type(node.op)](_evaluate(node.left, variables), _evaluate(node.right, variables))
-    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY:
-        return _UNARY[type(node.op)](_evaluate(node.operand, variables))
-    raise ValueError("Unsupported expression in symmetry operation.")
-
-
-def apply_operation(operation: str, fractional: tuple[float, float, float]) -> tuple[float, float, float]:
-    parts = operation.strip().strip("'\"").lower().replace("−", "-").split(",")
-    if len(parts) != 3:
-        raise ValueError(f"Invalid symmetry operation: {operation}")
-    variables = dict(zip(("x", "y", "z"), map(float, fractional), strict=True))
-    result = []
-    for expression in parts:
-        parsed = ast.parse(expression.strip(), mode="eval")
-        value = _evaluate(parsed, variables) % 1.0
-        result.append(0.0 if np.isclose(value, 0.0) or np.isclose(value, 1.0) else float(value))
-    return tuple(result)

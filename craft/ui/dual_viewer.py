@@ -22,6 +22,7 @@ from craft.analysis.motif_comparison import MotifComparisonReport
 from craft.core.document import StructureDocument
 from craft.ui.comparison_highlight import highlight_pair
 from craft.ui.viewer import CameraState, StructureViewer
+from craft.ui.viewer_state import clear_viewer_document
 
 
 def rotation_only_camera_state(source: CameraState, target: CameraState) -> CameraState:
@@ -159,6 +160,16 @@ class DualStructureViewer(QWidget):
             candidate.setStyleSheet(
                 "border: 2px solid #2f80ed;" if active else "border: 2px solid transparent;"
             )
+
+    def clear_pair(self) -> None:
+        self.first_document = None
+        self.second_document = None
+        self._motif_report = None
+        for viewer in (self.left, self.right):
+            clear_viewer_document(viewer)
+        self.left_label.setText("A")
+        self.right_label.setText("B")
+        self.status_label.clear()
 
     def set_pair(
         self,

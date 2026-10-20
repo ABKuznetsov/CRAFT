@@ -1,4 +1,4 @@
-"""Presentation model for scientific nomenclature supplied by CrIStMa."""
+"""CRAFT-owned mineralogical names layered over native scientific evidence."""
 
 from __future__ import annotations
 

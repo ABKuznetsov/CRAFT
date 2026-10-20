@@ -10,13 +10,56 @@ ICON_RELATIVE="assets/craft.ico"; ICON_SOURCE="$ROOT/$ICON_RELATIVE"
 if [ "$1" = "--print-config" ]; then
   print -r -- "{\"app_name\":\"$APP_NAME\",\"bundle_id\":\"$BUNDLE_ID\",\"pkg_name\":\"$PKG_NAME\",\"install_path\":\"/Applications/$APP_NAME.app\",\"relocatable\":false,\"icon\":\"icon.icns\",\"icon_source\":\"$ICON_RELATIVE\",\"signing\":\"adhoc\",\"launcher\":\"native-mach-o\"}"; exit 0
 fi
-command -v pkgbuild >/dev/null || { print -u2 -- "pkgbuild is required."; exit 1; }
-command -v productbuild >/dev/null || { print -u2 -- "productbuild is required."; exit 1; }
-command -v clang >/dev/null || { print -u2 -- "clang is required."; exit 1; }
+if [ -n "$1" ] && [ "$1" != "--stage-only" ]; then
+  print -u2 -- "Usage: $0 [--print-config|--stage-only]"; exit 2
+fi
+if [ "$1" != "--stage-only" ]; then
+  command -v pkgbuild >/dev/null || { print -u2 -- "pkgbuild is required."; exit 1; }
+  command -v productbuild >/dev/null || { print -u2 -- "productbuild is required."; exit 1; }
+  command -v clang >/dev/null || { print -u2 -- "clang is required."; exit 1; }
+fi
 if [ -d "$WORK" ]; then chmod -R u+w "$WORK" >/dev/null 2>&1 || true; fi
 rm -rf "$WORK"; mkdir -p "$CONTENTS/MacOS" "$APP_ROOT" "$SCRIPTS" "$DIST"
-rsync -a --exclude '.git/' --exclude '.DS_Store' --exclude '._*' --exclude '__pycache__/' --exclude '*.pyc' --exclude '*.exe' --exclude '.venv/' --exclude '.pytest_cache/' --exclude '.ruff_cache/' --exclude 'build/' --exclude 'dist/' --exclude 'tests/' --exclude '.superpowers/' --exclude '*.egg-info/' "$ROOT/" "$APP_ROOT/"
+python3 - "$ROOT" "$APP_ROOT" <<'PY'
+import json
+import shutil
+import sys
+import tomllib
+from pathlib import Path
+
+root, destination = map(Path, sys.argv[1:])
+metadata = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+
+# Allow only production code and the runtime resources declared by the package.
+paths = set((root / "craft").rglob("*.py"))
+for pattern in metadata["tool"]["setuptools"]["package-data"]["craft"]:
+    matches = list((root / "craft").glob(pattern))
+    if not matches:
+        raise SystemExit(f"Missing runtime resource: {pattern}")
+    paths.update(matches)
+paths.update(root / name for name in (
+    "LICENSE", "toolkit/launch_craft.command", "toolkit/setup_craft_env.command",
+))
+for source in sorted(paths):
+    relative = source.relative_to(root)
+    if any(part.startswith(".") or part == "__pycache__" for part in relative.parts):
+        continue
+    target = destination / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+
+# The launcher needs version and dependency metadata, but no development tools.
+project = metadata["project"]
+keys = ("name", "version", "description", "requires-python", "dependencies")
+(destination / "pyproject.toml").write_text(
+    "[project]\n" + "".join(f"{key} = {json.dumps(project[key])}\n" for key in keys),
+    encoding="utf-8",
+)
+PY
 chmod +x "$APP_ROOT"/toolkit/*.command
+if [ "$1" = "--stage-only" ]; then
+  print -r -- "$APP_ROOT"; exit 0
+fi
 if [ -f "$ICON_SOURCE" ]; then
   ICON_PYTHON=""
   for candidate in "$ROOT/.venv/bin/python" /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 python3; do
@@ -65,7 +108,17 @@ codesign --force --deep --sign - --identifier "$BUNDLE_ID" "$APP"
 COMPONENT="$WORK/CRAFT.component.pkg"
 COMPONENT_PLIST="$WORK/component.plist"
 pkgbuild --analyze --root "$PAYLOAD" "$COMPONENT_PLIST"
-/usr/libexec/PlistBuddy -c 'Set :0:BundleIsRelocatable false' "$COMPONENT_PLIST"
+python3 - "$COMPONENT_PLIST" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+components = plistlib.loads(path.read_bytes())
+for component in components:
+    component["BundleIsRelocatable"] = False
+path.write_bytes(plistlib.dumps(components))
+PY
 pkgbuild --root "$PAYLOAD" --install-location / --identifier "$PKG_ID" --version "$VERSION" --ownership recommended --scripts "$SCRIPTS" --component-plist "$COMPONENT_PLIST" "$COMPONENT"
 productbuild --package "$COMPONENT" "$PKG_PATH"
 print -r -- "$PKG_PATH"

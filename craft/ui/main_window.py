@@ -3,10 +3,9 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QSignalBlocker
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -18,7 +17,6 @@ from PySide6.QtGui import (
     QPixmap,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QCheckBox,
     QColorDialog,
     QComboBox,
@@ -28,7 +26,6 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QGridLayout,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -38,14 +35,12 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
-    QSpinBox,
     QSplitter,
     QStackedWidget,
     QStyle,
     QTabBar,
     QTabWidget,
     QToolBar,
-    QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -85,21 +80,19 @@ from craft.analysis.reporting import (
     export_report_json,
     export_table_csv,
 )
-from craft.adapters.cristma import build_legacy_projection
 from craft.core.collection import StructureCollection
 from craft.core.document import StructureDocument, load_document
-from craft.core.model import CrystalStructure
+from craft.core.project import PROJECT_SUFFIX, LoadedProject, load_project, save_project
 from craft.core.progressive_load import (
     LoadStage,
     StructureLoadUpdate,
     iter_load_updates,
     iter_reanalysis_updates,
-    iter_native_reanalysis_updates,
 )
 from craft.core.reference_data_warmup import start_cristma_reference_data_warmup
 from craft.core.scientific_cache import ScientificRequestKey
 from craft.core.structure_io import is_supported_structure_path, load_structure_files
-from craft.core.scene import build_asymmetric_scene, build_scene
+from craft.core.scene import build_scene
 from craft.core.site_orbits import (
     hierarchy_object_orbits,
     polyhedron_orbits,
@@ -107,6 +100,7 @@ from craft.core.site_orbits import (
     site_orbits,
 )
 from craft.presentation.organic_scene import (
+    OrganicSceneData,
     OrganicSceneMode,
     build_organic_scene,
 )
@@ -114,21 +108,25 @@ from craft.ui.organic_views import (
     OrganicViewKind,
     default_organic_view,
     organic_analysis_summary,
+    organic_scene_mode,
 )
-from craft.core.xpff import load_xpff_structures
 from craft.ui.analysis_workspace import AnalysisWorkspace
 from craft.ui.compare_workspace import CompareWorkspace
+from craft.ui.camera_controls import view_lattice_axis, zoom_view
 from craft.ui.comparison_requests import (
     ComparisonRequestManager,
     QtComparisonExecutor,
 )
 from craft.ui.dual_viewer import DualStructureViewer
 from craft.ui.hierarchy_tree import HierarchyTree
+from craft.ui.inspector_sections import InspectorSections
 from craft.ui.interpretation_panel import InterpretationPanel
 from craft.ui.morphology_workspace import MorphologyWorkspace
 
 from craft.ui.report_capture import (
     capture_report_figure,
+    capture_automatic_report_figure,
+    capture_morphology_report_figure,
     render_manifest_preview,
     standard_overview_manifest,
 )
@@ -138,8 +136,10 @@ from craft.ui.structure_load_requests import (
     StructureLoadRequestManager,
 )
 from craft.ui.viewer import StructureViewer
+from craft.ui.workspace_stack import WorkspaceStack
+from craft.ui.viewer_state import read_viewer_state, clear_viewer_document
+from craft.ui.project_view import capture_project_view, restore_project_camera, restore_project_controls
 from craft.knowledge.resolve import (
-    confirm_bond_changes,
     remove_overlay,
     resolve_interpretation,
 )
@@ -199,6 +199,7 @@ class MainWindow(QMainWindow):
         # CRAFT no longer owns or imports a local series-analysis model.
         self.series_report: object | None = None
         self.current_path: Path | None = None
+        self.project_path: Path | None = None
         self._picked_polyhedron_id: str | None = None
         self._picked_scene_object: tuple[str, object] | None = None
         self._focused_molecule_id: str | None = None
@@ -208,6 +209,7 @@ class MainWindow(QMainWindow):
         self.scene_rebuild_timer.timeout.connect(self._rebuild_scene)
         self._build_ui()
         self._build_actions()
+        self._visualization_changed(redraw=False)
         self._initialize_comparison_requests(QtComparisonExecutor(self))
         self._initialize_structure_load_requests(QtStructureLoadExecutor(self))
         self.statusBar().showMessage("Ready · drop a CIF or open a structure")
@@ -235,6 +237,8 @@ class MainWindow(QMainWindow):
         )
         self.analysis_workspace.export_csv_requested.connect(self.export_analysis_csv)
         self.analysis_workspace.export_json_requested.connect(self.export_analysis_json)
+        self.analysis_workspace.export_html_requested.connect(self.export_illustrated_report)
+        self.analysis_workspace.export_docx_requested.connect(self.export_word_report)
         root = QSplitter(Qt.Orientation.Horizontal)
         root.setChildrenCollapsible(False)
         root.addWidget(self._hierarchy_explorer())
@@ -242,10 +246,28 @@ class MainWindow(QMainWindow):
         root.addWidget(self._inspector())
         root.setSizes([285, 930, 285])
         self.structure_workspace = root
+        self.comparison_mode_stack.currentChanged.connect(self._sync_report_layout)
         self.central_stack = QStackedWidget()
         self.central_stack.addWidget(self.structure_workspace)
         self.setCentralWidget(self.central_stack)
         self._build_output_dock()
+
+    def _sync_report_layout(self, _index: int = -1) -> None:
+        """Give the report the full workspace, preserving the structure layout."""
+        root = self.structure_workspace
+        report_open = self.comparison_mode_stack.currentWidget() is self.analysis_workspace
+        saved = getattr(self, "_report_layout_state", None)
+        panels = (root.widget(0), root.widget(2))
+        if report_open and saved is None:
+            self._report_layout_state = (root.sizes(), tuple(not panel.isHidden() for panel in panels))
+            for panel in panels:
+                panel.hide()
+        elif not report_open and saved is not None:
+            sizes, visibility = saved
+            for panel, visible in zip(panels, visibility):
+                panel.setVisible(visible)
+            root.setSizes(sizes)
+            self._report_layout_state = None
 
     def _hierarchy_explorer(self) -> QWidget:
         panel = QWidget()
@@ -265,6 +287,7 @@ class MainWindow(QMainWindow):
         self.object_tree.setHeaderHidden(True)
         self.object_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.object_tree.object_selected.connect(self._hierarchy_object_selected)
+        self.object_tree.object_selected.connect(self._hierarchy_scope_selected)
         self.object_tree.compare_toggled.connect(self._toggle_compare_document)
         self.object_tree.visibility_changed.connect(self._set_document_visibility)
         self.object_tree.customContextMenuRequested.connect(self._tree_context_menu)
@@ -272,6 +295,7 @@ class MainWindow(QMainWindow):
         self.sites_panel = SitesPanel()
         self.sites_panel.setMinimumHeight(220)
         self.sites_panel.state_changed.connect(self._sites_state_changed)
+        self.sites_panel.scope_object_selected.connect(self._table_object_selected)
         self.sites_panel.report_draft_changed.connect(self._report_draft_changed)
         self.sites_panel.organic_object_activated.connect(
             self._organic_object_activated
@@ -328,7 +352,7 @@ class MainWindow(QMainWindow):
         visual_layout.setSpacing(6)
         self._structure_summary().hide()
         visual_layout.addWidget(self.viewer_stack, 1)
-        self.comparison_mode_stack = QStackedWidget()
+        self.comparison_mode_stack = WorkspaceStack()
         self.comparison_mode_stack.addWidget(self.comparison_visual_page)
         self.comparison_mode_stack.addWidget(self.compare_workspace)
         self.comparison_mode_stack.addWidget(self.morphology_workspace)
@@ -367,16 +391,13 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 8, 8, 8)
         self.inspector_tabs = QTabWidget()
-        self.inspector_tabs.addTab(self._analysis_inspector(), "Analysis")
-        self.inspector_tabs.addTab(self._visualization_inspector(), "Visualization")
-        self.inspector_tabs.addTab(self._cell_inspector(), "Cell")
-        self.inspector_tabs.addTab(self._selection_inspector(), "Selection")
+        self.inspector_tabs.addTab(self._analysis_inspector(), "Details")
+        self.inspector_tabs.addTab(self._visualization_inspector(), "Display")
         self.interpretation_panel = InterpretationPanel()
         self.interpretation_panel.remove_requested.connect(self._remove_interpretation)
-        self.interpretation_panel.confirm_bonds_requested.connect(
-            self._confirm_interpretation_bonds
-        )
-        self.inspector_tabs.addTab(self.interpretation_panel, "Interpretation")
+        interpretation_tab = self.inspector_tabs.addTab(self.interpretation_panel, "Interpretation")
+        self.inspector_tabs.setTabVisible(interpretation_tab, False)
+        self.inspector_tabs.setCurrentIndex(1)
         layout.addWidget(self.inspector_tabs)
         return panel
 
@@ -414,9 +435,9 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(body)
         layout.setContentsMargins(2, 4, 2, 2)
         layout.addWidget(_caption("VISUALIZATION"))
-        tabs = QTabWidget()
-        tabs.setObjectName("visualizationTabs")
-        layout.addWidget(tabs)
+        sections = InspectorSections()
+        self.display_sections = sections
+        layout.addWidget(sections)
 
         self.show_checks: dict[str, QCheckBox] = {}
 
@@ -471,8 +492,18 @@ class MainWindow(QMainWindow):
         self.axes_size_slider.setValue(30)
         self.axes_size_slider.valueChanged.connect(self._visualization_changed)
         general_layout.addWidget(self.axes_size_slider)
+        general_layout.addWidget(QLabel("Legend scale"))
+        self.legend_scale_slider = QSlider(Qt.Orientation.Horizontal)
+        self.legend_scale_slider.setRange(50, 200)
+        self.legend_scale_slider.setValue(100)
+        self.legend_scale_slider.setToolTip("Legend size: 50–200%; symbols and captions scale together")
+        self.legend_scale_slider.valueChanged.connect(self._visualization_changed)
+        general_layout.addWidget(self.legend_scale_slider)
+        layout_hint = QLabel("Drag to rotate. Double-click the structure, legend or compass, then drag to move it. Esc cancels.")
+        layout_hint.setWordWrap(True)
+        general_layout.addWidget(layout_hint)
         general_layout.addStretch()
-        tabs.addTab(general, "General")
+        sections.add_section("General", general, expanded=True)
 
         atoms = QWidget()
         atoms_layout = QVBoxLayout(atoms)
@@ -507,7 +538,7 @@ class MainWindow(QMainWindow):
         atoms_layout.addWidget(self.split_occupancy_check)
         atoms_layout.addWidget(self.vacancy_sector_check)
         atoms_layout.addStretch()
-        tabs.addTab(atoms, "Atoms")
+        sections.add_section("Atoms", atoms)
 
         bonds = QWidget()
         bonds_layout = QVBoxLayout(bonds)
@@ -526,7 +557,7 @@ class MainWindow(QMainWindow):
         self.bond_radius_slider.valueChanged.connect(self._visualization_changed)
         bonds_layout.addWidget(self.bond_radius_slider)
         bonds_layout.addStretch()
-        tabs.addTab(bonds, "Bonds")
+        sections.add_section("Bonds", bonds)
 
         polyhedra = QWidget()
         polyhedra_layout = QVBoxLayout(polyhedra)
@@ -553,7 +584,7 @@ class MainWindow(QMainWindow):
         self.poly_edge_slider.valueChanged.connect(self._visualization_changed)
         polyhedra_layout.addWidget(self.poly_edge_slider)
         polyhedra_layout.addStretch()
-        tabs.addTab(polyhedra, "Polyhedra")
+        sections.add_section("Polyhedra", polyhedra)
 
         blocks = QWidget()
         blocks_layout = QVBoxLayout(blocks)
@@ -574,7 +605,8 @@ class MainWindow(QMainWindow):
             "to show stable colors by block type."
         ))
         blocks_layout.addStretch()
-        tabs.addTab(blocks, "Blocks")
+        sections.add_section("Blocks", blocks)
+        sections.add_section("Cell", self._cell_inspector())
 
         return body
 
@@ -645,22 +677,9 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         return body
 
-    def _selection_inspector(self) -> QWidget:
-        body = QWidget()
-        layout = QVBoxLayout(body)
-        layout.addWidget(_caption("SELECTION"))
-        text = QLabel(
-            "Hierarchy tree: select an object\n\n"
-            "3D view:\n"
-            "• Left drag — rotate\n"
-            "• Middle drag — pan\n"
-            "• Wheel — zoom\n\n"
-            "Direct 3D picking and multi-selection are the next interaction milestone."
-        )
-        text.setWordWrap(True)
-        layout.addWidget(text)
-        layout.addStretch()
-        return body
+    def _show_cell_settings(self) -> None:
+        self.inspector_tabs.setCurrentIndex(1)
+        self.display_sections.reveal("Cell")
 
     def _build_output_dock(self) -> None:
         self.output_dock = QDockWidget("Output / Console / History", self)
@@ -693,13 +712,14 @@ class MainWindow(QMainWindow):
         window_menu = menu_bar.addMenu("Window")
         help_menu = menu_bar.addMenu("Help")
 
-        new_action = self._menu_action(file_menu, "New Session", self.close_structure, "Ctrl+N")
+        new_action = self._menu_action(file_menu, "New Session", self.close_project, "Ctrl+N")
         open_action = self._menu_action(file_menu, "Open Structure…", self.open_file, "Ctrl+O")
-        self._menu_action(file_menu, "Open Project…", enabled=False)
+        self._menu_action(file_menu, "Open Project…", self.open_project)
         recent = file_menu.addMenu("Recent Files")
         self._menu_action(recent, "No recent files", enabled=False)
-        examples = file_menu.addMenu("Open Example")
-        self._menu_action(examples, "Gehlenite — Ca₂Al₂SiO₇", self.open_demo)
+        if GEHLENITE_DEMO.is_file():
+            examples = file_menu.addMenu("Open Example")
+            self._menu_action(examples, "Gehlenite — Ca₂Al₂SiO₇", self.open_demo)
         file_menu.addSeparator()
         import_menu = file_menu.addMenu("Import")
         self._menu_action(import_menu, "CIF", self.open_file)
@@ -711,6 +731,8 @@ class MainWindow(QMainWindow):
             self._menu_action(export_menu, label, enabled=False)
         self._menu_action(export_menu, "Current Analysis Table (CSV)…", self.export_analysis_csv)
         self._menu_action(export_menu, "Analysis Report (JSON)…", self.export_analysis_json)
+        self._menu_action(export_menu, "Illustrated Report (HTML)…", self.export_illustrated_report)
+        self._menu_action(export_menu, "Word Report (.docx)…", self.export_word_report)
         self.morphology_csv_action = self._menu_action(
             export_menu, "Morphology CSV…", self.export_morphology_table, enabled=False
         )
@@ -728,11 +750,11 @@ class MainWindow(QMainWindow):
             file_menu, "Save Morphology Model…", self.save_morphology_model, enabled=False
         )
         file_menu.addSeparator()
-        self._menu_action(file_menu, "Save Project", enabled=False)
-        self._menu_action(file_menu, "Save Project As…", enabled=False)
+        self.save_project_action = self._menu_action(file_menu, "Save Project", self.save_project, "Ctrl+S")
+        self._menu_action(file_menu, "Save Project As…", lambda: self.save_project(save_as=True), "Ctrl+Alt+S")
         file_menu.addSeparator()
         self._menu_action(file_menu, "Close Structure", self.close_structure)
-        self._menu_action(file_menu, "Close Project", enabled=False)
+        self._menu_action(file_menu, "Close Project", self.close_project)
         file_menu.addSeparator()
         self._menu_action(file_menu, "Preferences…", enabled=False)
         self._menu_action(file_menu, "Exit", self.close, "Ctrl+Q")
@@ -757,14 +779,14 @@ class MainWindow(QMainWindow):
             ("Right", lambda: self._camera("right")),
             ("Top", lambda: self._camera("top")),
             ("Bottom", lambda: self._camera("bottom")),
-            ("Along a", lambda: self._command_viewer().view_axis("a")),
-            ("Along b", lambda: self._command_viewer().view_axis("b")),
-            ("Along c", lambda: self._command_viewer().view_axis("c")),
+            ("Along a", lambda: self._view_axis("a")),
+            ("Along b", lambda: self._view_axis("b")),
+            ("Along c", lambda: self._view_axis("c")),
         ):
             self._menu_action(camera, label, callback)
         projection = view_menu.addMenu("Projection")
-        self._menu_action(projection, "Perspective", lambda: self._command_viewer().plotter.disable_parallel_projection())
-        self._menu_action(projection, "Orthographic", lambda: self._command_viewer().plotter.enable_parallel_projection())
+        self._menu_action(projection, "Perspective", lambda: self._camera_viewer().plotter.disable_parallel_projection())
+        self._menu_action(projection, "Orthographic", lambda: self._camera_viewer().plotter.enable_parallel_projection())
         show = view_menu.addMenu("Show")
         for label, checkbox in (
             ("Unit Cell", self.cell_check),
@@ -793,7 +815,7 @@ class MainWindow(QMainWindow):
             self._menu_action(view_menu, label, enabled=False)
         self._menu_action(view_menu, "Fullscreen", self._toggle_fullscreen, "Ctrl+Shift+F")
 
-        self._menu_action(structure_menu, "Supercell…", lambda: self.inspector_tabs.setCurrentIndex(2))
+        self._menu_action(structure_menu, "Supercell…", self._show_cell_settings)
         for label in ("Wrap Atoms", "Primitive Cell", "Conventional Cell", "Expand Coordination"):
             self._menu_action(structure_menu, label, enabled=False)
         self._menu_action(structure_menu, "Recalculate Polyhedra", self._rebuild_hierarchy)
@@ -879,7 +901,8 @@ class MainWindow(QMainWindow):
 
         for label in ("User Guide", "Tutorials", "Hot Keys"):
             self._menu_action(help_menu, label, enabled=False)
-        self._menu_action(help_menu, "Open Gehlenite Example", self.open_demo)
+        if GEHLENITE_DEMO.is_file():
+            self._menu_action(help_menu, "Open Gehlenite Example", self.open_demo)
         self._menu_action(help_menu, "About CRAFT", self._about)
 
         toolbar = QToolBar("Main")
@@ -888,22 +911,23 @@ class MainWindow(QMainWindow):
         series_action.triggered.connect(self.open_series)
         open_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton))
         series_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
-        snapshot_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
-        toolbar.addActions((open_action, series_action, snapshot_action))
+        self.save_project_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
+        self.save_project_action.setToolTip("Save CRAFT project: structures, colours and visibility (Ctrl+S)")
+        toolbar.addActions((open_action, series_action, self.save_project_action))
         toolbar.addSeparator()
         for axis in ("a", "b", "c"):
             action = QAction(axis, self)
-            action.triggered.connect(lambda _checked=False, value=axis: self._command_viewer().view_axis(value))
+            action.triggered.connect(lambda _checked=False, value=axis: self._view_axis(value))
             toolbar.addAction(action)
         toolbar.addSeparator()
         fit_action = QAction("Fit", self)
-        fit_action.triggered.connect(lambda: self._command_viewer().plotter.reset_camera())
+        fit_action.triggered.connect(lambda: self._camera_viewer().plotter.reset_camera())
         toolbar.addAction(fit_action)
         zoom_in_action = QAction("Zoom +", self)
-        zoom_in_action.triggered.connect(lambda: self._command_viewer().zoom(1.2))
+        zoom_in_action.triggered.connect(lambda: self._zoom_camera(1.2))
         toolbar.addAction(zoom_in_action)
         zoom_out_action = QAction("Zoom −", self)
-        zoom_out_action.triggered.connect(lambda: self._command_viewer().zoom(1.0 / 1.2))
+        zoom_out_action.triggered.connect(lambda: self._zoom_camera(1.0 / 1.2))
         toolbar.addAction(zoom_out_action)
         toolbar.addSeparator()
         self.edit_mode_action = QAction("Select", self)
@@ -919,9 +943,9 @@ class MainWindow(QMainWindow):
         if "viewer" in self.__dict__:
             self.viewer.edit_mode_changed.connect(self.edit_mode_action.setChecked)
         toolbar.addAction(self.edit_mode_action)
-        report_snapshot_action = QAction("Report snapshot", self)
+        report_snapshot_action = QAction("Add to report", self)
         report_snapshot_action.setToolTip(
-            "Add the current semantic view and a PNG preview to this structure's report"
+            "Add this view with an automatic description, caption and relevant tables"
         )
         report_snapshot_action.triggered.connect(self._snapshot_for_report)
         toolbar.addAction(report_snapshot_action)
@@ -982,7 +1006,20 @@ class MainWindow(QMainWindow):
         menu.addAction(action)
         return action
 
+    def close_project(self) -> None:
+        self.collection = StructureCollection(max_compared=self.collection.max_compared)
+        self.project_path = None
+        self._active_comparison_signature = None
+        self._active_comparison_bundle = None
+        self._installed_comparison_visual_signature = None
+        self.close_structure()
+        self.sites_panel.set_document(None)
+
     def close_structure(self) -> None:
+        MainWindow._discard_scene_selection(self)
+        self.active_document_id = None
+        self._active_structure_load_signature = None
+        self._structure_load_document_ids = {}
         self.structure = None
         self.hierarchy = None
         self.series_report = None
@@ -994,14 +1031,28 @@ class MainWindow(QMainWindow):
         self.cell_summary.setText("No structure")
         for value in self.dashboard_values.values():
             value.setText("—")
-        self.viewer.structure = None
-        self.viewer.scene = None
-        self.viewer.hierarchy = None
-        self.viewer.reset_visibility(redraw=False)
-        self.viewer.redraw()
-        self.morphology_workspace.viewer.clear()
-        self.morphology_workspace.current_model = None
-        self.morphology_workspace.current_calculation = None
+        clear_viewer_document(self.viewer)
+        dual = getattr(self, "dual_viewer", None)
+        if dual is not None:
+            dual.clear_pair()
+        comparison = getattr(self, "compare_workspace", None)
+        if comparison is not None:
+            comparison.set_loading("Open two structures to compare")
+        compare_button = getattr(self, "compare_structures_button", None)
+        if compare_button is not None:
+            compare_button.setEnabled(False)
+        self.morphology_workspace.clear_document()
+        viewer_stack = getattr(self, "viewer_stack", None)
+        if viewer_stack is not None:
+            viewer_stack.setCurrentWidget(self.viewer)
+        modes = getattr(self, "comparison_mode_stack", None)
+        visual_page = getattr(self, "comparison_visual_page", None)
+        if modes is not None and visual_page is not None:
+            modes.setCurrentWidget(visual_page)
+        comparison_tabs = getattr(self, "comparison_mode_tabs", None)
+        if comparison_tabs is not None:
+            comparison_tabs.setVisible(False)
+        MainWindow._sync_hierarchy_controls(self, HierarchyLevel.SITES, force_tab=True)
         self._update_morphology_actions()
         self.statusBar().showMessage("New empty session")
 
@@ -1012,7 +1063,7 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _camera(self, direction: str) -> None:
-        viewer = self._command_viewer()
+        viewer = self._camera_viewer()
         mapping = {
             "front": (viewer.plotter.view_xz, False),
             "back": (viewer.plotter.view_xz, True),
@@ -1024,6 +1075,23 @@ class MainWindow(QMainWindow):
         callback, negative = mapping[direction]
         callback(negative=negative)
         viewer.plotter.reset_camera()
+
+    def _camera_viewer(self):
+        if self.comparison_mode_stack.currentWidget() is self.morphology_workspace:
+            return self.morphology_workspace.viewer
+        return self._command_viewer()
+
+    def _view_axis(self, axis: str) -> None:
+        viewer = self._camera_viewer()
+        if viewer is self.morphology_workspace.viewer:
+            document = self.morphology_workspace.document
+            if document is not None:
+                view_lattice_axis(viewer.plotter, document.structure.cell, axis)
+        else:
+            viewer.view_axis(axis)
+
+    def _zoom_camera(self, factor: float) -> None:
+        zoom_view(self._camera_viewer().plotter, factor)
 
     def _command_viewer(self) -> StructureViewer:
         if self.dual_viewer is not None and self.viewer_stack.currentWidget() is self.dual_viewer:
@@ -1073,12 +1141,64 @@ class MainWindow(QMainWindow):
             self,
             "Open crystal structure",
             "",
-            "Crystal structures (*.cif *.xpff *.res *.ins *.vasp *.pdb *.xyz POSCAR CONTCAR);;"
+            "Structures and projects (*.craft *.cif *.xpff *.res *.ins *.vasp *.pdb *.xyz POSCAR CONTCAR);;"
+            "CRAFT projects (*.craft);;"
             "CIF files (*.cif);;XRD Finder projects (*.xpff);;SHELX files (*.res *.ins);;"
             "VASP files (*.vasp POSCAR CONTCAR);;PDB files (*.pdb);;XYZ files (*.xyz);;All files (*)",
         )
         if path:
             self.load_path(path)
+
+    def open_project(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Open CRAFT project", "", "CRAFT projects (*.craft)")
+        if path:
+            self.load_path(path)
+
+    def save_project(self, *, save_as: bool = False) -> None:
+        if not self.collection.order or self.active_document_id not in self.collection.documents:
+            self.statusBar().showMessage("Open a structure before saving a project")
+            return
+        path = getattr(self, "project_path", None)
+        if path is None or save_as:
+            proposed = str(path) if path else str(Path(self.current_path or "crystal").with_suffix(PROJECT_SUFFIX))
+            selected, _ = QFileDialog.getSaveFileName(self, "Save CRAFT project", proposed,
+                                                     "CRAFT projects (*.craft)")
+            if not selected:
+                return
+            path = Path(selected)
+            if path.suffix.lower() != PROJECT_SUFFIX:
+                path = path.with_name(path.name + PROJECT_SUFFIX)
+        try:
+            save_project(path, self.collection, self.active_document_id,
+                         view_settings=capture_project_view(self))
+        except Exception as error:
+            QMessageBox.critical(self, "Cannot save CRAFT project", str(error))
+            return
+        self.project_path = Path(path)
+        self.statusBar().showMessage(f"Saved project: {self.project_path.name}")
+
+    def _install_project(self, project: LoadedProject, path: Path) -> None:
+        self.scene_rebuild_timer.stop()
+        MainWindow._discard_scene_selection(self)
+        self.morphology_workspace.clear_document()
+        self.sites_panel.set_document(None)
+        self.object_tree.clear()
+        self.collection = project.collection
+        self.active_document_id = None
+        self._active_comparison_signature = None
+        self._active_comparison_bundle = None
+        self._installed_comparison_visual_signature = None
+        self.viewer_stack.setCurrentWidget(self.viewer)
+        self.comparison_mode_stack.setCurrentWidget(self.comparison_visual_page)
+        MainWindow._set_sites_comparison_locked(self, False)
+        self._set_comparison_tabs_visible(False)
+        restore_project_controls(self, project.view_settings)
+        self._visualization_changed(redraw=False)
+        self._activate_document(project.active_document_id)
+        level = self.collection.documents[project.active_document_id].visual.level
+        MainWindow._sync_hierarchy_controls(self, level, force_tab=True)
+        restore_project_camera(self, project.view_settings)
+        self.project_path = path
 
     def open_demo(self) -> None:
         self.load_path(GEHLENITE_DEMO)
@@ -1100,9 +1220,25 @@ class MainWindow(QMainWindow):
             if key[0] == signature
         }
         self.series_report = None
-        self.current_path = source_path
+        project = source_path.suffix.casefold() == PROJECT_SUFFIX
+        if not project:
+            self.current_path = source_path
         self.statusBar().showMessage(f"Reading {source_path.name}…")
         manager = getattr(self, "_structure_load_requests", None)
+        if project:
+            def work(progressed) -> None:
+                progressed(load_project(source_path))
+
+            if manager is None:
+                try:
+                    work(lambda result: MainWindow._structure_load_progress(self, signature, result))
+                except Exception as error:
+                    MainWindow._structure_load_failed(self, signature, error)
+                else:
+                    MainWindow._structure_load_ready(self, signature)
+            else:
+                manager.request(signature, work)
+            return
         if manager is None:
             try:
                 for update in iter_load_updates(source_path):
@@ -1152,8 +1288,12 @@ class MainWindow(QMainWindow):
             or signature != getattr(self, "_active_structure_load_signature", signature)
         ):
             return
+        if isinstance(update, LoadedProject):
+            self._install_project(update, Path(str(signature[-1])))
+            return
         key = (signature, update.structure_index)
         if update.stage is LoadStage.PARSED:
+            MainWindow._discard_scene_selection(self)
             document = StructureDocument.from_preview(update.loaded)
             if update.structure_count > 1:
                 document.id = f"{document.id}-{update.structure_index + 1}"
@@ -1185,8 +1325,13 @@ class MainWindow(QMainWindow):
                 if document.id == self.active_document_id:
                     self.structure = document.legacy_projection
                     self.hierarchy = document.hierarchy
-                    self._refresh_loading_models(document)
-                    MainWindow._maybe_apply_organic_default(self, document)
+                    if update.stage is LoadStage.RETICULAR_NET:
+                        self._refresh_models()
+                    else:
+                        self._refresh_loading_models(document)
+                    MainWindow._maybe_apply_organic_default(
+                        self, document, refresh=update.stage is LoadStage.RETICULAR_NET,
+                    )
                 else:
                     self._fill_hierarchy_tree()
             elif update.native_snapshot is not None:
@@ -1195,7 +1340,7 @@ class MainWindow(QMainWindow):
                     self.structure = document.legacy_projection
                     self.hierarchy = document.hierarchy
                     if update.stage in {
-                        LoadStage.BONDS,
+                        LoadStage.CONTACTS,
                         LoadStage.POLYHEDRA,
                         LoadStage.BLOCKS,
                     }:
@@ -1213,17 +1358,12 @@ class MainWindow(QMainWindow):
         labels = {
             LoadStage.PARSED: "Atoms ready · classifying chemistry…",
             LoadStage.CHEMISTRY: "Chemistry ready · resolving contacts…",
-            LoadStage.BONDS: "Bonds ready · calculating polyhedra…",
             LoadStage.POLYHEDRA: "Coordination figures ready · building structural graph…",
             LoadStage.UNITS: "Structural graph ready · finding structural blocks…",
             LoadStage.BLOCKS: "Structural blocks ready · finding ring motifs…",
             LoadStage.RINGS: "Structural blocks and ring motifs ready",
-            LoadStage.TOPOLOGY: "Structure analysis ready",
-            LoadStage.BONDS_PROFILE: "Bonds and profile ready · finding molecules…",
-            LoadStage.COMPONENTS: "Molecules and rings ready · finding contacts…",
-            LoadStage.CONTACTS: "Contacts ready · analyzing packing…",
+            LoadStage.CONTACTS: "Contacts ready · analyzing structural units…",
             LoadStage.PACKING: "Packing analysis ready",
-            LoadStage.RETICULAR: "Reticular analysis ready",
             LoadStage.MOLECULAR: "Molecules and rings ready · finding contacts…",
             LoadStage.INTERMOLECULAR: "Intermolecular contacts ready · analyzing packing…",
             LoadStage.RETICULAR_PRECURSOR: "Coordination nodes and linkers ready · building SBUs…",
@@ -1237,19 +1377,30 @@ class MainWindow(QMainWindow):
         )
         self.statusBar().showMessage(f"{update.source_path.name}{position} · {labels[update.stage]}")
 
-    def _maybe_apply_organic_default(self, document: StructureDocument) -> None:
-        """Install the first useful organic scene without overriding user choice."""
-        if not hasattr(self, "viewer") or document.visual.organic_view_user_selected:
+    def _maybe_apply_organic_default(
+        self, document: StructureDocument, *, refresh: bool = False,
+    ) -> None:
+        """Install an early scene and refresh the chosen view on completion."""
+        if not hasattr(self, "viewer"):
             return
         native_molecular = getattr(document.scientific.molecular, "result", None)
-        if native_molecular is not None:
-            kind = default_organic_view(document)
-            if document.visual.organic_active_view == kind.value:
-                return
-            MainWindow._apply_organic_view(self, kind.value, user_selected=False)
+        if native_molecular is None:
             return
+        if document.visual.organic_view_user_selected:
+            if refresh and document.visual.organic_active_view is not None:
+                MainWindow._apply_organic_view(
+                    self, document.visual.organic_active_view,
+                    identifier=document.visual.organic_active_object_id,
+                    user_selected=False,
+                )
+        else:
+            category = default_organic_view(document).value
+            if document.visual.organic_active_view == category and not refresh:
+                return
+            MainWindow._apply_organic_view(self, category, user_selected=False)
 
     def _refresh_loading_models(self, document: StructureDocument) -> None:
+        MainWindow._sync_interpretation_card(self)
         self._fill_hierarchy_tree()
         self.sites_panel.set_document(document)
         self._fill_cell()
@@ -1268,7 +1419,7 @@ class MainWindow(QMainWindow):
         count = sum(1 for key in self._structure_load_document_ids if key[0] == signature)
         count_note = f" · {count} structures" if count > 1 else ""
         name = Path(str(signature[-1])).name
-        self.statusBar().showMessage(f"Loaded {name}{count_note} · mechanical hierarchy ready")
+        self.statusBar().showMessage(f"Loaded {name}{count_note}")
 
     def _structure_load_failed(
         self,
@@ -1331,10 +1482,8 @@ class MainWindow(QMainWindow):
         )
 
     def _refresh_models(self) -> None:
-        self._fill_hierarchy_tree()
         document = self.collection.documents.get(self.active_document_id or "")
-        if document is not None:
-            self.sites_panel.set_document(document)
+        MainWindow._sync_interpretation_card(self)
         self._fill_cell()
         self._fill_dashboard()
         self._fill_dynamics()
@@ -1356,11 +1505,14 @@ class MainWindow(QMainWindow):
         ).build()
         if document is not None:
             draft = ensure_report_draft(document, self.analysis_report)
+            if document.report_draft is not None:
+                document.report_draft = draft
             self.analysis_workspace.set_report(self.analysis_report, draft)
-            self._fill_hierarchy_tree()
-            self.sites_panel.set_document(document)
         else:
             self.analysis_workspace.set_report(self.analysis_report)
+        self._fill_hierarchy_tree()
+        if document is not None:
+            self.sites_panel.set_document(document)
 
     def show_analysis_workspace(self) -> None:
         if self.structure is None:
@@ -1397,9 +1549,9 @@ class MainWindow(QMainWindow):
         if path:
             try:
                 table = report.table(table_id)
-                model = self.analysis_workspace._models.get(table_id)
-                if model is not None:
-                    table = replace(table, rows=tuple(model.rows))
+                draft = getattr(self.analysis_workspace, "draft", None)
+                if draft is not None:
+                    table = draft.publication_table(table)
                 export_table_csv(table, path)
             except ValueError as error:
                 QMessageBox.warning(self, "Cannot export table", str(error))
@@ -1417,12 +1569,44 @@ class MainWindow(QMainWindow):
         )
         if path:
             selected_ids = self.analysis_workspace.selected_table_ids()
+            draft = self.analysis_workspace.draft
             selected_tables = {
-                table_id: report.tables[table_id]
+                table_id: draft.publication_table(report.tables[table_id]) if draft is not None else report.tables[table_id]
                 for table_id in selected_ids
                 if table_id in report.tables
             }
             export_report_json(replace(report, tables=selected_tables), path)
+
+    def export_illustrated_report(self) -> None:
+        self._export_composed_report("html")
+
+    def export_word_report(self) -> None:
+        self._export_composed_report("docx")
+
+    def _export_composed_report(self, format: str) -> None:
+        document = self.collection.documents.get(self.active_document_id or "")
+        if document is None or self.analysis_report is None:
+            self.statusBar().showMessage("Open a structure before exporting a report")
+            return
+        draft = document.report_draft or self.analysis_workspace.draft or ensure_report_draft(document, self.analysis_report)
+        title, filter = (("Export Word report", "Word document (*.docx)") if format == "docx" else
+                         ("Export illustrated report", "HTML report (*.html)"))
+        path, _ = QFileDialog.getSaveFileName(self, title, f"structure-report.{format}", filter)
+        if path:
+            target = Path(path)
+            if target.suffix.lower() != "." + format:
+                target = target.with_name(target.name + "." + format)
+            try:
+                if format == "docx":
+                    from craft.analysis.reporting.docx_export import export_report_docx
+                    export_report_docx(draft, self.analysis_report, target)
+                else:
+                    from craft.analysis.reporting.automatic import render_report_html
+                    target.write_text(render_report_html(draft, self.analysis_report), encoding="utf-8")
+            except (OSError, ValueError) as error:
+                QMessageBox.warning(self, "Cannot export report", str(error))
+                return
+            self.statusBar().showMessage(f"Report exported: {target.name}")
 
     def save_morphology_model(self) -> None:
         if self.structure is None:
@@ -1545,6 +1729,9 @@ class MainWindow(QMainWindow):
 
     def _fill_hierarchy_tree(self) -> None:
         self.object_tree.set_collection(self.collection)
+        tree_filter = getattr(self, "tree_filter", None)
+        if tree_filter is not None:
+            MainWindow._filter_tree(self, tree_filter.text())
         self.compare_structures_button.setEnabled(
             len(self.collection.documents) > 1 and len(self.collection.compared_ids) == 2
         )
@@ -1559,11 +1746,14 @@ class MainWindow(QMainWindow):
         needle = text.strip().lower()
 
         def visit(item: QTreeWidgetItem) -> bool:
-            child_match = any(visit(item.child(index)) for index in range(item.childCount()))
+            child_match = False
+            for index in range(item.childCount()):
+                # Every child must update its visibility, even after a match.
+                child_match = visit(item.child(index)) or child_match
             search_text = item.data(0, HierarchyTree.SearchTextRole) or item.text(0)
             own_match = not needle or needle in str(search_text).lower()
             visible = own_match or child_match
-            item.setHidden(not visible)
+            item.setHidden(not visible or bool(item.data(0, HierarchyTree.TableDetailRole)))
             if needle and child_match:
                 item.setExpanded(True)
             return visible
@@ -1577,36 +1767,17 @@ class MainWindow(QMainWindow):
         document = self.collection.documents.get(document_id)
         if document is None:
             return
+        MainWindow._discard_scene_selection(self)
         self.active_document_id = document_id
         self.structure = document.legacy_projection
         self.hierarchy = document.hierarchy
         self.series_report = None
         self.current_path = document.source.source_path
-        self.sites_panel.set_document(document)
         update_actions = getattr(self, "_update_morphology_actions", None)
         if update_actions is not None:
             update_actions()
         self._rebuild_scene(reset_camera=True)
-        self._fill_cell()
-        self._fill_dashboard()
-        self._fill_dynamics()
-        self._fill_output()
-        inorganic_document = (
-            document
-            if document.profile_decision is None
-            or document.profile_decision.resolved is ResolvedProfile.INORGANIC
-            else None
-        )
-        self.analysis_report = StructureReportBuilder(
-            self.structure,
-            hierarchy=self.hierarchy,
-            organic_presentation=document.organic_presentation(),
-            inorganic_document=inorganic_document,
-        ).build()
-        draft = ensure_report_draft(document, self.analysis_report)
-        self.analysis_workspace.set_report(self.analysis_report, draft)
-        self._fill_hierarchy_tree()
-        self.sites_panel.set_document(document)
+        self._refresh_models()
         if self.comparison_mode_stack.currentWidget() is self.morphology_workspace:
             self.morphology_workspace.set_document(document)
 
@@ -1952,6 +2123,33 @@ class MainWindow(QMainWindow):
         document = self.collection.documents.get(document_id)
         if document is None:
             return
+        if kind == "crystal_layer_group":
+            from craft.presentation.layer_state import set_layer_visibility
+            for key in object_id:
+                set_layer_visibility(document, key, visible,
+                                     MainWindow._crystal_layer_ancestors(self, document, key))
+            if visible:
+                document.visual.level = HierarchyLevel.SITES
+            MainWindow._sync_layer_controls(self, document)
+            if document_id == self.active_document_id:
+                self._rebuild_scene(reset_camera=False)
+            return
+        if kind == "crystal_layer":
+            if visible:
+                if document_id == self.active_document_id:
+                    MainWindow._select_crystal_layer(self, document, str(object_id))
+                    return
+                from craft.presentation.layer_state import set_layer_visibility
+                set_layer_visibility(document, str(object_id), True,
+                                     MainWindow._crystal_layer_ancestors(self, document, str(object_id)))
+            else:
+                from craft.presentation.layer_state import set_layer_visibility
+                set_layer_visibility(document, str(object_id), False,
+                                     MainWindow._crystal_layer_ancestors(self, document, str(object_id)))
+            MainWindow._sync_layer_controls(self, document)
+            if not visible and document_id == self.active_document_id:
+                self.viewer.apply_visual_state(document.visual, redraw=True)
+            return
         if kind == "contact_group":
             rows = tuple(
                 getattr(getattr(document, "contact_presentation", None), "rows", ())
@@ -1974,6 +2172,14 @@ class MainWindow(QMainWindow):
                 self.sites_panel.set_document(document)
             return
         native = document.scientific.crystal_chemistry is not None
+        if native and kind == "block":
+            from craft.presentation.block_state import set_block_visibility
+            if not set_block_visibility(document.visual, document.inorganic_presentation(), object_id, visible):
+                return
+            MainWindow._sync_layer_controls(self, document)
+            if document_id == self.active_document_id:
+                self.viewer.apply_visual_state(document.visual, redraw=True)
+            return
         attributes = {
             "atom": "hidden_atom_orbit_ids" if native else "hidden_atom_indices",
             "polyhedron": (
@@ -2017,11 +2223,32 @@ class MainWindow(QMainWindow):
             document is not None
             and document.scientific.crystal_chemistry is not None
         )
+        if kind == "report_section" or (kind == "category" and object_id == "report"):
+            section = str(object_id) if kind == "report_section" else "preview"
+            self._show_report()
+            self.sites_panel.set_category(f"report_{section}" if section != "preview" else "report_figures")
+            self.analysis_workspace.select_section(section)
+            return
+        if native and kind == "crystal_layer_group":
+            MainWindow._set_document_visibility(self, document_id, kind, object_id, True)
+            self._picked_scene_object = (kind, tuple(object_id))
+            return
+        if native and kind == "crystal_layer":
+            MainWindow._select_crystal_layer(self, document, str(object_id))
+            return
+        if native and kind == "polyhedron":
+            MainWindow._select_crystal_layer(self, document, f"polyhedron:{object_id}")
+            self.sites_panel.select_object(kind, object_id)
+            return
+        if native and kind == "atom" and document.visual.crystal_layers_enabled:
+            MainWindow._select_crystal_layer(self, document, f"atom:{object_id}")
+            self.sites_panel.select_object(kind, object_id)
+            return
         if native and kind in {"atom", "bond", "polyhedron", "ring", "block"}:
             self.sites_panel.select_object(kind, object_id)
             if kind == "block":
-                document.visual.shown_block_ids.add(str(object_id))
-                document.visual.hidden_block_ids.discard(str(object_id))
+                from craft.presentation.block_state import set_block_visibility
+                set_block_visibility(document.visual, document.inorganic_presentation(), object_id, True)
                 self._show_level(HierarchyLevel.RIGID_BLOCKS)
                 self.viewer.apply_visual_state(document.visual, redraw=True)
             self.viewer.edit_default_kind = {
@@ -2031,12 +2258,13 @@ class MainWindow(QMainWindow):
             }.get(kind, self.viewer.edit_default_kind)
             self.statusBar().showMessage(f"Selected {kind}: {object_id}")
             return
-        if self.hierarchy is None:
+        if (native and kind == "category" and str(object_id) != "topology"
+                and document.visual.crystal_layers_enabled):
+            # Browsing a branch to edit its members must not turn off the
+            # illustration that the table is describing.
+            self.sites_panel.set_category(str(object_id))
             return
-        if kind == "report_section":
-            self._show_report()
-            self.sites_panel.set_category(f"report_{object_id}")
-            self.analysis_workspace.select_section(str(object_id))
+        if self.hierarchy is None:
             return
         if kind == "level":
             self._show_level(HierarchyLevel(object_id))
@@ -2092,6 +2320,25 @@ class MainWindow(QMainWindow):
             self._analyze_atom(int(object_id))
         elif kind == "cell":
             self._analyze_cell()
+
+    def _hierarchy_scope_selected(self, document_id, kind, object_id) -> None:
+        document = self.collection.documents.get(document_id)
+        if document is None or not hasattr(document.structure, "atomic_view"):
+            return
+        if kind == "category" and object_id == "report":
+            return
+        if kind not in {"structure", "category", "crystal_layer", "crystal_layer_group", "atom", "polyhedron", "block", "ring"}:
+            return
+        item = self.object_tree.currentItem()
+        if item is not None and item.data(0, Qt.ItemDataRole.UserRole) == (document_id, kind, object_id):
+            self.sites_panel.set_tree_scope(document, item)
+
+    def _table_object_selected(self, kind, object_id) -> None:
+        """Select a constituent for toolbar commands without enabling it."""
+        self._picked_scene_object = (kind, object_id)
+        self._picked_polyhedron_id = str(object_id) if kind == "polyhedron" else None
+        self.viewer.selected_scene_object = (kind, object_id)
+        self.viewer.selected_polyhedron_id = self._picked_polyhedron_id
 
     @staticmethod
     def _level_node(label: str, level: HierarchyLevel) -> QTreeWidgetItem:
@@ -2265,49 +2512,56 @@ class MainWindow(QMainWindow):
     def _show_interpretation(self, domain_id: str) -> None:
         document = self.collection.documents.get(self.active_document_id or "")
         if document is None:
-            return
-        self._selected_interpretation_domain_id = domain_id
-        self.interpretation_panel.set_resolved(
-            resolve_interpretation(document, domain_id)
-        )
-        self.inspector_tabs.setCurrentIndex(
-            self.inspector_tabs.indexOf(self.interpretation_panel)
-        )
-
-    def _remove_interpretation(self) -> None:
-        document = self.collection.documents.get(self.active_document_id or "")
-        if document is None:
-            return
-        domain_id = getattr(self, "_selected_interpretation_domain_id", None)
-        remove_overlay(document)
-        self._fill_hierarchy_tree()
-        if domain_id is not None:
-            self._show_interpretation(domain_id)
-
-    def _confirm_interpretation_bonds(self) -> None:
-        document = self.collection.documents.get(self.active_document_id or "")
-        if document is None:
+            MainWindow._clear_interpretation_card(self)
             return
         try:
-            confirm_bond_changes(document)
-        except Exception as error:
-            self.interpretation_panel.status_label.setText(str(error))
+            resolved = resolve_interpretation(document, domain_id)
+        except KeyError:
+            MainWindow._clear_interpretation_card(self)
             return
-        self.structure = document.legacy_projection
-        self.hierarchy = document.hierarchy
-        self._rebuild_scene(reset_camera=False)
-        self._refresh_models()
+        self._interpretation_document = document
+        self._selected_interpretation_domain_id = domain_id
+        self.interpretation_panel.set_resolved(resolved)
+        index = self.inspector_tabs.indexOf(self.interpretation_panel)
+        self.inspector_tabs.setTabVisible(index, True)
+        self.inspector_tabs.setCurrentIndex(index)
+
+    def _clear_interpretation_card(self) -> None:
+        self._interpretation_document = None
+        self._selected_interpretation_domain_id = None
+        panel = getattr(self, "interpretation_panel", None)
+        if panel is not None:
+            panel.set_automatic()
+            self.inspector_tabs.setTabVisible(self.inspector_tabs.indexOf(panel), False)
+
+    def _sync_interpretation_card(self) -> None:
+        owner = getattr(self, "_interpretation_document", None)
+        if owner is None:
+            return
+        document = self.collection.documents.get(self.active_document_id or "")
         domain_id = getattr(self, "_selected_interpretation_domain_id", None)
-        if domain_id is not None and any(
+        if owner is not document or not any(
             item.id == domain_id for item in document.hierarchy.structural_domains
         ):
-            self._show_interpretation(domain_id)
+            MainWindow._clear_interpretation_card(self)
+            return
+        self.interpretation_panel.set_resolved(resolve_interpretation(document, domain_id))
+
+    def _remove_interpretation(self) -> None:
+        MainWindow._sync_interpretation_card(self)
+        document = self.collection.documents.get(self.active_document_id or "")
+        if document is None or getattr(self, "_interpretation_document", None) is not document:
+            return
+        domain_id = getattr(self, "_selected_interpretation_domain_id", None)
+        remove_overlay(document, domain_id=domain_id)
+        self._fill_hierarchy_tree()
+        MainWindow._show_interpretation(self, domain_id)
 
     def _analyze_cell(self) -> None:
         self._clear_local_environment()
         self.selected_title.setText("Unit Cell")
         self.selected_analysis.setText(self.cell_summary.text().replace("\n", "<br>"))
-        self.inspector_tabs.setCurrentIndex(2)
+        self._show_cell_settings()
 
     def _analyze_atom(self, site_index: int) -> None:
         self._clear_local_environment()
@@ -2334,10 +2588,96 @@ class MainWindow(QMainWindow):
         )
         self.inspector_tabs.setCurrentIndex(0)
 
+    def _select_crystal_layer(self, document, key: str) -> None:
+        from craft.presentation.layer_state import set_layer_visibility
+        if not set_layer_visibility(document, key, True, MainWindow._crystal_layer_ancestors(self, document, key)):
+            return
+        self._picked_scene_object = ("crystal_layer", key)
+        document.visual.level = HierarchyLevel.SITES
+        MainWindow._sync_layer_controls(self, document)
+        self._rebuild_scene(reset_camera=False)
+        self.statusBar().showMessage("Crystal-chemical layer added · other levels retained · right-click to style")
+
+    def _crystal_layer_ancestors(self, document, key):
+        tree = getattr(self, "object_tree", None)
+        finder = getattr(tree, "find_object", None)
+        item = finder(document.id, "crystal_layer", key) if finder is not None else None
+        return tree.layer_ancestors(item) if item is not None else ()
+
+    def _sync_layer_controls(self, document):
+        tree = getattr(self, "object_tree", None)
+        if tree is not None:
+            tree.sync_crystal_layers(document)
+        panel = getattr(self, "sites_panel", None)
+        if panel is not None and getattr(panel, "_document", document) is document:
+            panel.set_document(document)
+
+    def _set_crystal_layer_representation(self, representation: str) -> None:
+        selected = getattr(self, "_picked_scene_object", None)
+        document = self.collection.documents.get(self.active_document_id or "")
+        if document is None or selected is None or selected[0] != "crystal_layer":
+            return
+        style = document.visual.crystal_layers.get(str(selected[1]))
+        if style is not None and style.representation != "atoms":
+            document.visual.crystal_layers[str(selected[1])] = replace(style, representation=representation)
+            self.viewer.apply_visual_state(document.visual, redraw=True)
+
+    def _set_crystal_layer_offset(self, offset) -> None:
+        selected = getattr(self, "_picked_scene_object", None)
+        document = self.collection.documents.get(self.active_document_id or "")
+        if document is None or selected is None or selected[0] != "crystal_layer":
+            return
+        style = document.visual.crystal_layers.get(str(selected[1]))
+        offset = tuple(float(value) for value in offset)
+        if len(offset) != 3 or not np.all(np.isfinite(offset)):
+            raise ValueError("A display shift requires three finite values")
+        if style is not None and style.display_offset != offset:
+            document.visual.crystal_layers[str(selected[1])] = replace(style, display_offset=offset)
+            self.viewer.apply_visual_state(document.visual, redraw=True)
+
+    def _edit_crystal_layer_offset(self) -> None:
+        from craft.ui.crystal_layer_shift import ask_layer_offset
+
+        selected = getattr(self, "_picked_scene_object", None)
+        document = self.collection.documents.get(self.active_document_id or "")
+        if document is None or selected is None or selected[0] != "crystal_layer":
+            return
+        style = document.visual.crystal_layers.get(str(selected[1]))
+        scene = getattr(self.viewer, "native_scene", None)
+        layer = next((layer for layer in getattr(scene, "crystal_layers", ())
+                      if layer.key == str(selected[1])), None)
+        if style is not None and layer is not None:
+            offset = ask_layer_offset(self, layer.label, style.display_offset)
+            if offset is not None:
+                self._set_crystal_layer_offset(offset)
+
+    def _add_crystal_layer_style_menu(self, menu) -> None:
+        menu.addAction("Change layer color…", self._change_picked_color)
+        document = self.collection.documents.get(self.active_document_id or "")
+        selected = getattr(self, "_picked_scene_object", None)
+        style = document.visual.crystal_layers.get(str(selected[1])) if document is not None and selected else None
+        if style is not None and style.representation != "atoms":
+            menu.addAction("Show polyhedral edges", lambda: self._set_crystal_layer_representation("edges"))
+            menu.addAction("Show as polyhedra", lambda: self._set_crystal_layer_representation("polyhedra"))
+            menu.addAction("Show topology lines", lambda: self._set_crystal_layer_representation("lines"))
+        if style is not None:
+            menu.addAction("Move display copy…", self._edit_crystal_layer_offset)
+            reset = menu.addAction("Reset display shift", lambda: self._set_crystal_layer_offset((0., 0., 0.)))
+            reset.setEnabled(any(style.display_offset))
+        menu.addSeparator()
+
     def _tree_context_menu(self, position) -> None:
+        target = self.object_tree.itemAt(position)
+        if target is not None:
+            self.object_tree.setCurrentItem(target)
         if not self.object_tree.selectedItems():
             return
         menu = QMenu(self)
+        selected = getattr(self, "_picked_scene_object", None)
+        if selected is not None and selected[0] == "crystal_layer":
+            self._add_crystal_layer_style_menu(menu)
+        elif selected is not None and selected[0] == "crystal_layer_group":
+            menu.addAction("Change group color…", self._change_picked_color)
         menu.addAction("Hide from View", self._hide_selected)
         menu.addAction("Isolate Selected", self._isolate_selected)
         menu.addSeparator()
@@ -2359,6 +2699,11 @@ class MainWindow(QMainWindow):
         payloads = []
         if getattr(self, "_picked_scene_object", None):
             kind, object_id = self._picked_scene_object
+            if kind in {"crystal_layer", "crystal_layer_group"}:
+                self._set_document_visibility(self.active_document_id, kind, object_id, False)
+                document = self.collection.documents[self.active_document_id]
+                self.object_tree.sync_crystal_layers(document)
+                return
             document = self.collection.documents.get(self.active_document_id or "")
             native = (
                 document is not None
@@ -2377,7 +2722,7 @@ class MainWindow(QMainWindow):
                 identifiers = tuple(
                     polyhedron_orbits(document).get(key, (object_id,))
                 )
-            elif document is not None and kind in {"unit", "block"}:
+            elif document is not None and kind in {"unit", "block"} and not (native and kind == "block"):
                 objects = (
                     document.hierarchy.structural_units
                     if kind == "unit"
@@ -2415,6 +2760,9 @@ class MainWindow(QMainWindow):
             "connector": "hidden_connector_ids",
         }
         for kind, object_id, item in payloads:
+            if native and kind == "block":
+                from craft.presentation.block_state import set_block_visibility
+                set_block_visibility(document.visual, document.inorganic_presentation(), object_id, False)
             self.viewer.hide_object(kind, object_id, redraw=False)
             if document is not None:
                 attribute = hidden_attributes.get(kind)
@@ -2474,6 +2822,26 @@ class MainWindow(QMainWindow):
             and document.scientific.crystal_chemistry is not None
         )
         if native:
+            tree = getattr(self, "object_tree", None)
+            finder = getattr(tree, "find_object", None)
+            item = finder(document.id, kind, object_id) if finder is not None else None
+            if item is not None:
+                visible_item = item
+                while visible_item.parent() is not None and visible_item.data(0, HierarchyTree.TableDetailRole):
+                    visible_item = visible_item.parent()
+                blocked = tree.blockSignals(True)
+                try:
+                    tree.clearSelection()
+                    tree.setCurrentItem(visible_item)
+                    visible_item.setSelected(True)
+                    parent = visible_item.parent()
+                    while parent is not None:
+                        parent.setExpanded(True)
+                        parent = parent.parent()
+                    tree.scrollToItem(visible_item)
+                finally:
+                    tree.blockSignals(blocked)
+                self.sites_panel.set_tree_scope(document, item)
             self.statusBar().showMessage(
                 f"Selected {kind}: {object_id} · Delete hides · Esc clears"
             )
@@ -2494,16 +2862,39 @@ class MainWindow(QMainWindow):
         self._picked_scene_object = None
         self._picked_polyhedron_id = None
 
+    def _discard_scene_selection(self) -> None:
+        """Do not carry window-owned targets across document/analysis changes."""
+        self.analysis_report = None
+        workspace = getattr(self, "analysis_workspace", None)
+        clear_report = getattr(workspace, "clear_report", None)
+        if clear_report is not None:
+            clear_report()
+        self._picked_scene_object = None
+        self._picked_polyhedron_id = None
+        self._focused_molecule_id = None
+        viewer = getattr(self, "viewer", None)
+        if viewer is not None:
+            for name in ("selected_scene_object", "selected_polyhedron_id", "edit_target_kind", "comparison_highlight"):
+                if hasattr(viewer, name):
+                    setattr(viewer, name, None)
+        if hasattr(self, "local_environment"):
+            MainWindow._clear_local_environment(self)
+        if hasattr(self, "selected_title"):
+            self.selected_title.setText("Nothing selected")
+            self.selected_analysis.setText("Choose an object in the hierarchy tree.")
+
     def _scene_edit_context_menu(self, global_position) -> None:
         menu = QMenu(self)
         selected = getattr(self, "_picked_scene_object", None)
+        if selected is not None and selected[0] == "crystal_layer":
+            self._add_crystal_layer_style_menu(menu)
         hide_action = menu.addAction("Hide selected", self._hide_selected)
         isolate_action = menu.addAction("Isolate selected", self._isolate_selected)
         color_action = menu.addAction("Change color…", self._change_picked_color)
         hide_action.setEnabled(selected is not None)
         isolate_action.setEnabled(selected is not None)
         color_action.setEnabled(
-            selected is not None and selected[0] in {"atom", "polyhedron", "unit", "block"}
+            selected is not None and selected[0] in {"atom", "polyhedron", "unit", "block", "crystal_layer", "crystal_layer_group"}
         )
         menu.addSeparator()
         menu.addAction("Restore all", self._restore_scene)
@@ -2514,6 +2905,33 @@ class MainWindow(QMainWindow):
         if selected is None:
             return
         kind, _object_id = selected
+        if kind in {"crystal_layer", "crystal_layer_group"}:
+            document = self.collection.documents.get(self.active_document_id or "")
+            keys = tuple(_object_id) if kind == "crystal_layer_group" else (str(_object_id),)
+            style = document.visual.crystal_layers.get(keys[0]) if document is not None else None
+            if style is not None:
+                color = QColorDialog.getColor(QColor(style.color), self, "Layer color")
+                if color.isValid():
+                    from craft.presentation.layer_state import set_layer_color
+                    for key in keys:
+                        set_layer_color(document, key, color.name(),
+                                        MainWindow._crystal_layer_ancestors(self, document, key))
+                    MainWindow._sync_layer_controls(self, document)
+                    self.viewer.apply_visual_state(document.visual, redraw=True)
+            return
+        document = self.collection.documents.get(self.active_document_id or "")
+        if document is not None and hasattr(document.structure, "atomic_view") and kind in {"atom", "polyhedron", "block"}:
+            state = self.sites_panel._scope_style(kind, str(_object_id))
+            if state is None:
+                return
+            color = QColorDialog.getColor(QColor(state[0]), self, "Object color")
+            if color.isValid():
+                attribute = {"atom": "atom_orbit_colors", "polyhedron": "polyhedron_orbit_colors",
+                             "block": "block_colors"}[kind]
+                getattr(document.visual, attribute)[str(_object_id)] = color.name()
+                MainWindow._sync_layer_controls(self, document)
+                self.viewer.apply_visual_state(document.visual, redraw=True)
+            return
         table = self.sites_panel.current_table()
         row = table.currentRow()
         if row < 0 or table.item(row, 1) is None:
@@ -2542,53 +2960,38 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Select one hierarchy object to isolate")
             return
         kind, object_id, _item = payloads[0]
-        self.viewer.isolate_object(kind, object_id)
+        if kind in {"crystal_layer", "crystal_layer_group"}:
+            document = self.collection.documents.get(self.active_document_id or "")
+            if document is not None:
+                keys = set(object_id) if kind == "crystal_layer_group" else {str(object_id)}
+                if not keys <= document.visual.crystal_layers.keys():
+                    self.statusBar().showMessage("Selected layer is unavailable in the current structure")
+                    return
+                document.visual.crystal_layers = {
+                    key: replace(style, visible=(key in keys))
+                    for key, style in document.visual.crystal_layers.items()
+                }
+                self.viewer.apply_visual_state(document.visual, redraw=True)
+                MainWindow._sync_layer_controls(self, document)
+            return
+        if self.viewer.isolate_object(kind, object_id) is False:
+            self.statusBar().showMessage("Selected object is unavailable in the current scene")
+            return
         document = self.collection.documents.get(self.active_document_id or "")
         if document is not None:
-            for attribute in (
-                "hidden_atom_indices",
-                "hidden_atom_orbit_ids",
-                "hidden_atom_instance_keys",
-                "hidden_bond_orbits",
-                "hidden_bond_families",
-                "hidden_contact_orbit_ids",
-                "hidden_polyhedron_ids",
-                "hidden_polyhedron_orbit_ids",
-                "hidden_unit_ids",
-                "hidden_block_ids",
-                "hidden_connector_ids",
-                "hidden_topology_family_ids",
-                "shown_unit_ids",
-                "shown_ring_ids",
-                "shown_block_ids",
-            ):
-                setattr(
-                    document.visual,
-                    attribute,
-                    set(getattr(self.viewer, attribute, ())),
-                )
+            document.visual.copy_visibility_from(read_viewer_state(self.viewer))
+            document.visual.crystal_layers_enabled = False
             self.sites_panel.set_document(document)
         self.statusBar().showMessage(f"Isolated {object_id} · CIF unchanged")
 
     def _restore_scene(self) -> None:
         document = self.collection.documents.get(self.active_document_id or "")
         if document is not None:
-            document.visual.hidden_atom_indices.clear()
-            document.visual.hidden_atom_orbit_ids.clear()
-            document.visual.hidden_atom_instance_keys.clear()
-            document.visual.hidden_bond_orbits.clear()
-            document.visual.hidden_bond_families.clear()
-            document.visual.hidden_polyhedron_ids.clear()
-            document.visual.hidden_polyhedron_orbit_ids.clear()
-            document.visual.block_auto_hidden_atom_ids.clear()
-            document.visual.block_auto_hidden_polyhedron_orbit_ids.clear()
-            document.visual.hidden_unit_ids.clear()
-            document.visual.hidden_block_ids.clear()
-            document.visual.hidden_connector_ids.clear()
-            document.visual.hidden_topology_family_ids.clear()
-            document.visual.shown_unit_ids.clear()
-            document.visual.shown_ring_ids.clear()
-            document.visual.shown_block_ids.clear()
+            document.visual.reset_visibility()
+            document.visual.crystal_layers_enabled = False
+            document.visual.crystal_layers = {key: replace(style, visible=False, hidden_member_orbit_ids=frozenset())
+                                             for key, style in document.visual.crystal_layers.items()}
+            self.object_tree.sync_crystal_layers(document)
             document.visual.organic_active_view = None
             document.visual.organic_active_object_id = None
             document.visual.organic_view_user_selected = False
@@ -2631,24 +3034,27 @@ class MainWindow(QMainWindow):
             document = self.collection.documents.get(self.active_document_id or "")
             if document is not None:
                 document.visual.level = level
+                document.visual.crystal_layers_enabled = False
+                self.viewer.crystal_layers_enabled = False
             self.viewer.set_level(level)
-        for index in range(self.representation_combo.count()):
-            if self.representation_combo.itemData(index) == level.value:
-                self.representation_combo.blockSignals(True)
-                self.representation_combo.setCurrentIndex(index)
-                self.representation_combo.blockSignals(False)
-                break
-        for index in range(self.toolbar_view_combo.count()):
-            if self.toolbar_view_combo.itemData(index) == level.value:
-                self.toolbar_view_combo.blockSignals(True)
-                self.toolbar_view_combo.setCurrentIndex(index)
-                self.toolbar_view_combo.blockSignals(False)
-                break
-        tab_levels = [self.view_tabs.tabData(index) for index in range(self.view_tabs.count())]
-        if level.value in tab_levels:
-            self.view_tabs.blockSignals(True)
-            self.view_tabs.setCurrentIndex(tab_levels.index(level.value))
-            self.view_tabs.blockSignals(False)
+        MainWindow._sync_hierarchy_controls(self, level, force_tab=True)
+
+    def _sync_hierarchy_controls(self, level: HierarchyLevel, *, force_tab: bool = False) -> None:
+        """Reflect a document's level without invoking commands that reset its layers."""
+        for name in ("representation_combo", "toolbar_view_combo"):
+            combo = getattr(self, name, None)
+            if combo is not None:
+                index = combo.findData(level.value)
+                with QSignalBlocker(combo):
+                    combo.setCurrentIndex(max(0, index))
+        tabs = getattr(self, "view_tabs", None)
+        if tabs is None:
+            return
+        if not force_tab and tabs.tabData(tabs.currentIndex()) in {"report", "morphology"}:
+            return
+        values = [tabs.tabData(index) for index in range(tabs.count())]
+        with QSignalBlocker(tabs):
+            tabs.setCurrentIndex(values.index(level.value) if level.value in values else 0)
 
     def _representation_changed(self, index: int) -> None:
         self._show_level(HierarchyLevel(self.representation_combo.itemData(index)))
@@ -2656,6 +3062,10 @@ class MainWindow(QMainWindow):
     def _sites_state_changed(self) -> None:
         document = self.collection.documents.get(self.active_document_id or "")
         if document is None:
+            return
+        MainWindow._sync_layer_controls(self, document)
+        if getattr(self.sites_panel, "_category", None) == "hierarchy_scope":
+            self._rebuild_scene(reset_camera=False)
             return
         self.viewer.apply_visual_state(document.visual, redraw=True)
 
@@ -2680,42 +3090,26 @@ class MainWindow(QMainWindow):
             return
         native_molecular = getattr(document.scientific.molecular, "result", None)
         if native_molecular is not None:
+            document.visual.crystal_layers_enabled = False
             category = str(category)
-            document.visual.organic_active_view = category
-            document.visual.organic_active_object_id = identifier
-            if user_selected:
-                document.visual.organic_view_user_selected = True
-            if category == OrganicViewKind.CONTACTS.value:
-                mode = OrganicSceneMode.CONTACTS
-            elif category == OrganicViewKind.RINGS.value:
-                mode = OrganicSceneMode.RING
-            elif category in {
-                OrganicViewKind.COORDINATION_FRAGMENT.value,
-                OrganicViewKind.NODES_SBUS.value,
-            }:
-                mode = OrganicSceneMode.SBU
-            elif category == OrganicViewKind.LINKERS.value:
-                mode = OrganicSceneMode.LINKER
-            elif category == OrganicViewKind.PERIODIC_NETWORK.value:
-                mode = OrganicSceneMode.NET
-            elif category == OrganicViewKind.PACKING.value:
-                mode = OrganicSceneMode.PACKING
-            else:
-                mode = OrganicSceneMode.SINGLE_MOLECULE
+            mode = organic_scene_mode(category)
             scene = build_organic_scene(
                 document,
                 mode,
                 selected_object_id=identifier,
             )
-            if not scene.molecule_instances:
+            available = scene.net_nodes if mode is OrganicSceneMode.NET else scene.molecule_instances
+            if not available:
                 self.statusBar().showMessage(
                     "Native organic representation is not available"
                 )
                 return
-            chosen = scene.molecule_instances[0]
-            self._focused_molecule_id = chosen.molecule_id
-            if identifier is None:
-                document.visual.organic_active_object_id = chosen.molecule_orbit_id
+            document.visual.organic_active_view = category
+            document.visual.organic_active_object_id = scene.selected_object_id or identifier
+            if user_selected:
+                document.visual.organic_view_user_selected = True
+            chosen = scene.molecule_instances[0] if scene.molecule_instances else None
+            self._focused_molecule_id = chosen.molecule_id if chosen is not None else None
             self.viewer.set_document(document, reset_camera=True, scene=scene)
             if mode is OrganicSceneMode.PACKING:
                 self.statusBar().showMessage("Showing crystal packing · CIF unchanged")
@@ -2795,20 +3189,29 @@ class MainWindow(QMainWindow):
         if document is None:
             self.statusBar().showMessage("Open a structure before taking a report snapshot")
             return
-        figure = capture_report_figure(
-            document,
-            self.viewer,
-            kind=FigureKind.USER_SNAPSHOT,
-            title="Current structure view",
-            caption="User-selected CRAFT view.",
-        )
+        if getattr(self, "analysis_report", None) is None:
+            self.statusBar().showMessage("The active structure report is still loading")
+            return
+        from craft.analysis.reporting.automatic import append_report_view
+        workspace = getattr(self, "morphology_workspace", None)
+        stack = getattr(self, "comparison_mode_stack", None)
+        if workspace is not None and stack is not None and stack.currentWidget() is workspace:
+            if workspace.current_model is None:
+                self.statusBar().showMessage("No valid morphology model to add")
+                return
+            figure = capture_morphology_report_figure(document, workspace)
+        else:
+            figure = capture_automatic_report_figure(document, self.viewer,
+                selected_object=getattr(self, "_picked_scene_object", None))
         draft = document.report_draft
         if draft is None:
             draft = ensure_report_draft(document, self.analysis_report)
-        self._report_draft_changed(draft.with_figure(figure))
+        updated = append_report_view(draft, figure, self.analysis_report)
+        self._report_draft_changed(updated)
         self.analysis_workspace.set_report(self.analysis_report, document.report_draft)
-        self.analysis_workspace.select_section("figures")
-        self.statusBar().showMessage("Snapshot added to the report")
+        self.analysis_workspace.select_section("preview")
+        self.statusBar().showMessage("View added to report with description and tables" if len(updated.figures) > len(draft.figures)
+                                   else "This view is already in the report")
 
     def _standard_overview_for_report(self, label_mode: str) -> None:
         document = self.collection.documents.get(self.active_document_id or "")
@@ -2860,7 +3263,7 @@ class MainWindow(QMainWindow):
             update_actions()
         self.statusBar().showMessage("BFDH morphology workspace")
 
-    def _visualization_changed(self, _value=None) -> None:
+    def _visualization_changed(self, _value=None, *, redraw: bool = True) -> None:
         self.viewer.set_render_style(self.render_style_combo.currentText())
         self.viewer.radius_model = self.radius_combo.currentData()
         self.viewer.show_cell = self.cell_check.isChecked()
@@ -2872,6 +3275,7 @@ class MainWindow(QMainWindow):
         self.viewer.show_cell_dimensions = self.cell_dimensions_check.isChecked()
         self.viewer.cell_line_width = self.cell_line_slider.value() / 10.0
         self.viewer.axes_size = self.axes_size_slider.value() / 100.0
+        self.viewer.legend_scale = self.legend_scale_slider.value() / 100.0
         self.viewer.atom_scale = self.atom_scale.value() / 100.0
         self.viewer.bond_radius = self.bond_radius_slider.value() / 100.0
         self.viewer.bond_style = self.bond_style_combo.currentData()
@@ -2891,7 +3295,8 @@ class MainWindow(QMainWindow):
         self.viewer.show_polyhedra = self.show_checks["polyhedra"].isChecked()
         self.viewer.show_centers = self.show_checks["centers"].isChecked()
         self.viewer.show_connectors = self.show_checks["connectors"].isChecked()
-        self.viewer.redraw(reset_camera=False)
+        if redraw:
+            self.viewer.redraw(reset_camera=False)
         if self.dual_viewer is not None and self.viewer_stack.currentWidget() is self.dual_viewer:
             MainWindow._apply_dual_label_settings(self, self.dual_viewer)
 
@@ -2933,7 +3338,16 @@ class MainWindow(QMainWindow):
                 or document.profile_decision.resolved is ResolvedProfile.INORGANIC
             )
         )
-        if native:
+        organic = (active_document_matches_structure
+                   and document.scientific.molecular is not None
+                   and document.scientific.packing is not None)
+        layered = (active_document_matches_structure and document.visual.crystal_layers_enabled
+                   and document.scientific.polyhedra is not None)
+        if organic and not layered:
+            category = document.visual.organic_active_view or default_organic_view(document).value
+            scene = build_organic_scene(document, organic_scene_mode(category),
+                                        selected_object_id=document.visual.organic_active_object_id)
+        elif native or layered:
             scene = document.inorganic_scene_data(
                 settings.get("bounds", ((0.0, 1.0),) * 3),
                 include_contacts=settings["include_bonds"],
@@ -2947,12 +3361,14 @@ class MainWindow(QMainWindow):
         else:
             scene = build_scene(self.structure, **settings)
         if active_document_matches_structure:
-            self._focused_molecule_id = None
+            molecules = scene.molecule_instances if isinstance(scene, OrganicSceneData) else ()
+            self._focused_molecule_id = molecules[0].molecule_id if molecules else None
             self.viewer.set_document(
                 document,
                 reset_camera=reset_camera,
                 scene=scene,
             )
+            MainWindow._sync_hierarchy_controls(self, document.visual.level)
         else:
             self.viewer.set_data(
                 self.structure,
@@ -2982,6 +3398,11 @@ class MainWindow(QMainWindow):
             index = combo.findData(requested.value)
             combo.setCurrentIndex(max(0, index))
             combo.blockSignals(False)
+        contact_limit = getattr(self, "contact_limit", None)
+        if contact_limit is not None and document is not None:
+            blocked = contact_limit.blockSignals(True)
+            contact_limit.setValue(document.native_settings.shell_policy.candidate_rho_max)
+            contact_limit.blockSignals(blocked)
         result = getattr(self, "compound_type_result", None)
         if result is None:
             return
@@ -2995,10 +3416,12 @@ class MainWindow(QMainWindow):
             ResolvedProfile.MOLECULAR: "Molecular organic",
             ResolvedProfile.RETICULAR: "MOF / reticular",
         }
-        result.setText(
-            f"Detected: {names[decision.resolved]} · {decision.confidence.value} confidence"
-        )
+        provisional = decision.basis == "composition"
+        prefix = "Candidate" if provisional else "Detected"
+        result.setText(f"{prefix}: {names[decision.resolved]} · {decision.confidence.value} confidence")
         evidence = ["Evidence:", *(f"• {item}" for item in decision.reasons)]
+        if provisional:
+            evidence.extend(("", "Based on composition; structural confirmation is required."))
         if decision.warnings:
             evidence.extend(("", "Warnings:", *(f"• {item}" for item in decision.warnings)))
         result.setToolTip("\n".join(evidence))
@@ -3018,6 +3441,7 @@ class MainWindow(QMainWindow):
         ):
             return
         document.begin_reanalysis(requested)
+        MainWindow._discard_scene_selection(self)
         self.structure = document.legacy_projection
         self.hierarchy = document.hierarchy
         generation = getattr(self, "_structure_load_generation", 0) + 1
@@ -3034,14 +3458,15 @@ class MainWindow(QMainWindow):
             RequestedProfile.ORGANIC_METAL_ORGANIC: "organic / metal-organic",
         }
         self.statusBar().showMessage(f"Reanalyzing as {labels[requested]}…")
+        updates = iter_reanalysis_updates(document, requested)
 
         def work(progressed) -> None:
-            for update in iter_reanalysis_updates(document, requested):
+            for update in updates:
                 progressed(update)
 
         manager = getattr(self, "_structure_load_requests", None)
         if manager is None:
-            for update in iter_reanalysis_updates(document, requested):
+            for update in updates:
                 MainWindow._structure_load_progress(self, signature, update)
             MainWindow._structure_load_ready(self, signature)
         else:
@@ -3052,12 +3477,11 @@ class MainWindow(QMainWindow):
         document = self.collection.documents.get(self.active_document_id or "")
         if document is None:
             return
-        policy = document.native_settings.shell_policy.clone(
-            candidate_rho_max=float(value)
-        )
-        settings = document.native_settings.clone(shell_policy=policy)
-        document.native_settings = settings
+        document.native_settings = document.native_settings.with_contact_limit(float(value))
         document.begin_reanalysis(document.requested_profile)
+        MainWindow._discard_scene_selection(self)
+        self.structure = document.legacy_projection
+        self.hierarchy = document.hierarchy
         generation = getattr(self, "_structure_load_generation", 0) + 1
         self._structure_load_generation = generation
         signature = (
@@ -3071,14 +3495,15 @@ class MainWindow(QMainWindow):
         self._rebuild_scene(reset_camera=False)
         self._refresh_loading_models(document)
         self.statusBar().showMessage("Recalculating CrIStMa contacts…")
+        updates = iter_reanalysis_updates(document, document.requested_profile)
 
         def work(progressed) -> None:
-            for update in iter_native_reanalysis_updates(document, settings):
+            for update in updates:
                 progressed(update)
 
         manager = getattr(self, "_structure_load_requests", None)
         if manager is None:
-            for update in iter_native_reanalysis_updates(document, settings):
+            for update in updates:
                 MainWindow._structure_load_progress(self, signature, update)
             MainWindow._structure_load_ready(self, signature)
         else:
@@ -3166,9 +3591,12 @@ class MainWindow(QMainWindow):
         self.history.appendPlainText(f"Opened {self.current_path}")
 
     def save_screenshot(self) -> None:
+        if self.comparison_mode_stack.currentWidget() is self.morphology_workspace:
+            self.export_morphology_image()
+            return
         path, _ = QFileDialog.getSaveFileName(self, "Save snapshot", "crystal-mechanics.png", "PNG image (*.png)")
         if path:
-            self.viewer.save_screenshot(path)
+            self._command_viewer().save_screenshot(path)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         paths = [url.toLocalFile() for url in event.mimeData().urls()]

@@ -3,4 +3,4 @@
 from craft.core.model import AtomSite, CrystalStructure, UnitCell
 
 __all__ = ["AtomSite", "CrystalStructure", "UnitCell"]
-__version__ = "1.0.1"
+__version__ = "1.1.1"

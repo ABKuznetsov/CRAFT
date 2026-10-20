@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-import threading
-import time
 from typing import Protocol
 
-from PySide6.QtCore import QCoreApplication, QObject, Qt, Signal, Slot
+from craft.ui.background_tasks import QtBackgroundExecutor
 
 
 ComparisonSignature = tuple[object, ...] | str
@@ -113,55 +111,10 @@ class ComparisonRequestManager:
             self._start(request)
 
 
-class _ExecutorSignals(QObject):
-    succeeded = Signal(int, object)
-    failed = Signal(int, object)
+class QtComparisonExecutor(QtBackgroundExecutor):
+    """Run comparisons with the shared Qt worker lifecycle."""
 
-
-@dataclass(frozen=True, slots=True)
-class _ExecutorJob:
-    succeeded: Callable[[ComparisonBundle], None]
-    failed: Callable[[BaseException], None]
-    cancelled: threading.Event
-
-
-def _run_comparison_job(
-    job_id: int,
-    work: Callable[[], ComparisonBundle],
-    signals: _ExecutorSignals,
-    cancelled: threading.Event,
-) -> None:
-    try:
-        bundle = work()
-    except BaseException as error:
-        if not cancelled.is_set():
-            signals.failed.emit(job_id, error)
-    else:
-        if not cancelled.is_set():
-            signals.succeeded.emit(job_id, bundle)
-
-
-class QtComparisonExecutor(QObject):
-    """Run comparison work in a daemon and marshal callbacks to the GUI thread."""
-
-    def __init__(self, parent: QObject | None = None) -> None:
-        super().__init__(parent)
-        # The application owns the bridge so its QObject is always destroyed on
-        # the GUI thread, even when a cancelled daemon still retains its wrapper.
-        self._signals = _ExecutorSignals(QCoreApplication.instance())
-        self._signals.succeeded.connect(
-            self._deliver_success,
-            Qt.ConnectionType.QueuedConnection,
-        )
-        self._signals.failed.connect(
-            self._deliver_failure,
-            Qt.ConnectionType.QueuedConnection,
-        )
-        self._jobs: dict[int, _ExecutorJob] = {}
-        self._threads: list[threading.Thread] = []
-        self._next_job_id = 0
-        self._accepting = True
-        self._signals_connected = True
+    _thread_name = "crystal-comparison"
 
     def submit(
         self,
@@ -169,55 +122,7 @@ class QtComparisonExecutor(QObject):
         succeeded: Callable[[ComparisonBundle], None],
         failed: Callable[[BaseException], None],
     ) -> None:
-        if not self._accepting:
-            return
-        job_id = self._next_job_id
-        self._next_job_id += 1
-        cancelled = threading.Event()
-        self._jobs[job_id] = _ExecutorJob(succeeded, failed, cancelled)
-        self._threads = [thread for thread in self._threads if thread.is_alive()]
-        thread = threading.Thread(
-            target=_run_comparison_job,
-            args=(job_id, work, self._signals, cancelled),
-            name=f"crystal-comparison-{job_id}",
-            daemon=True,
-        )
-        self._threads.append(thread)
-        thread.start()
-
-    def close(self, timeout_ms: int = 100) -> bool:
-        self._accepting = False
-        jobs = tuple(self._jobs.values())
-        self._jobs.clear()
-        for job in jobs:
-            job.cancelled.set()
-        if self._signals_connected:
-            self._signals.succeeded.disconnect(self._deliver_success)
-            self._signals.failed.disconnect(self._deliver_failure)
-            self._signals_connected = False
-        # Leave a small part of the caller's shutdown budget for QObject/Python
-        # teardown after this method returns.  Consuming the complete budget in
-        # ``join`` makes a nominally bounded close exceed its deadline once the
-        # executor is immediately destroyed under application load.
-        timeout_seconds = max(0, int(timeout_ms)) / 1_000.0
-        join_budget = max(0.0, timeout_seconds - min(0.005, timeout_seconds))
-        deadline = time.monotonic() + join_budget
-        threads = tuple(self._threads)
-        for thread in threads:
-            thread.join(max(0.0, deadline - time.monotonic()))
-        return all(not thread.is_alive() for thread in threads)
-
-    @Slot(int, object)
-    def _deliver_success(self, job_id: int, bundle: ComparisonBundle) -> None:
-        job = self._jobs.pop(job_id, None)
-        if job is not None and self._accepting and not job.cancelled.is_set():
-            job.succeeded(bundle)
-
-    @Slot(int, object)
-    def _deliver_failure(self, job_id: int, error: BaseException) -> None:
-        job = self._jobs.pop(job_id, None)
-        if job is not None and self._accepting and not job.cancelled.is_set():
-            job.failed(error)
+        self._submit(lambda _progress: work(), None, succeeded, failed)
 
 
 __all__ = [

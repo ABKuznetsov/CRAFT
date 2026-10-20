@@ -67,7 +67,6 @@ class MorphologyTableModel(QAbstractTableModel):
         *,
         color_by_family: Mapping[Hkl, str] | None = None,
         reference_model: MorphologyModel | None = None,
-        primary_families: set[Hkl] | tuple[Hkl, ...] = (),
         user_added_families: set[Hkl] | tuple[Hkl, ...] = (),
     ) -> None:
         super().__init__(parent)
@@ -76,7 +75,6 @@ class MorphologyTableModel(QAbstractTableModel):
             plane.family.hkl for plane in model.planes
         )
         self.reference_model = reference_model or model
-        self.primary_families = frozenset(primary_families)
         self.user_added_families = frozenset(user_added_families)
         self._errors: dict[tuple[int, int], str] = {}
 
@@ -140,9 +138,7 @@ class MorphologyTableModel(QAbstractTableModel):
             MorphologyColumn.ORIGIN: (
                 "user-added"
                 if hkl in self.user_added_families
-                else "primary 80%"
-                if hkl in self.primary_families
-                else "additional BFDH"
+                else "BFDH"
             ),
             MorphologyColumn.STATE: (
                 "manual" if plane.manual else "not manifested" if area <= 0.0 else "BFDH"

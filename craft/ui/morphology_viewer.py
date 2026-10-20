@@ -15,6 +15,7 @@ from craft.analysis.morphology import Hkl
 from craft.analysis.morphology_geometry import MorphologyModel
 from craft.analysis.twin_geometry import TwinAggregate
 from craft.ui.morphology_colors import allocate_family_colors, rgb_tuple
+from craft.ui.crystallographic_labels import miller_label
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,7 +181,7 @@ class MorphologyViewer(QWidget):
         facet_labels = []
         for facet in visible_facets:
             hkl = facet.display_hkl if hasattr(facet, "display_hkl") else facet.plane_hkl
-            label = f"({hkl[0]} {hkl[1]} {hkl[2]})"
+            label = miller_label(hkl)
             domain_id = getattr(facet, "domain_id", "I")
             if aggregate is not None and domain_id != "I":
                 label = f"{domain_id} · {label}"
@@ -215,7 +216,7 @@ class MorphologyViewer(QWidget):
                         [np.mean(np.asarray(plane.polygon, dtype=float), axis=0) for plane in aggregate.composition_planes]
                     ),
                     [
-                        f"Composition ({plane.hkl[0]} {plane.hkl[1]} {plane.hkl[2]})"
+                        "Composition " + miller_label(plane.hkl)
                         for plane in aggregate.composition_planes
                     ],
                     show_points=False,
@@ -274,7 +275,7 @@ class MorphologyViewer(QWidget):
             name="morphology-structure-name",
         )
         legend_entries = [
-            (f"{{{family[0]} {family[1]} {family[2]}}}", colors_by_family[family])
+            (miller_label(family, form=True), colors_by_family[family])
             for family in sorted(self.mesh_data.id_by_family)
         ]
         if legend_entries:
@@ -359,7 +360,7 @@ class MorphologyViewer(QWidget):
                 line_width=5.0,
             )
         self.plotter.add_text(
-            f"{{{family[0]} {family[1]} {family[2]}}}",
+            miller_label(family, form=True),
             position="upper_left",
             font_size=11,
             color="#172033",

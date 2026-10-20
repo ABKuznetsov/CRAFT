@@ -105,6 +105,7 @@ class OrganicSceneData:
     net_nodes: tuple[OrganicNetNodeSceneInstance, ...]
     net_edges: tuple[OrganicNetEdgeSceneSegment, ...]
     unit_cell_edges: tuple[Edge, ...]
+    selected_object_id: str | None = None
 
 
 def _slot_result(document, name: str):
@@ -144,23 +145,25 @@ def build_organic_scene(
     molecules = materialized.molecules
     highlighted_bond_orbit_ids: tuple[str, ...] = ()
     selected_ligand = None
+    resolved_object_id = None
     if mode is OrganicSceneMode.RING:
         rings = tuple(getattr(molecular, "ring_orbits", ()))
         ring = next(
             (item for item in rings if item.ring_orbit_id == selected_object_id),
             rings[0] if selected_object_id is None and rings else None,
         )
-        if ring is not None:
-            parent_molecules = tuple(
-                item
-                for item in molecules
-                if item.molecule_orbit_id == ring.parent_component_orbit_id
-            )
-            if parent_molecules:
-                molecules = (
-                    min(parent_molecules, key=lambda item: item.molecule_id),
-                )
-            highlighted_bond_orbit_ids = tuple(ring.bond_orbit_ids)
+        if ring is None:
+            return OrganicSceneData(mode, (), (), (), (), (), (), (), ())
+        resolved_object_id = ring.ring_orbit_id
+        parent_molecules = tuple(
+            item
+            for item in molecules
+            if item.molecule_orbit_id == ring.parent_component_orbit_id
+        )
+        if not parent_molecules:
+            return OrganicSceneData(mode, (), (), (), (), (), (), (), ())
+        molecules = (min(parent_molecules, key=lambda item: item.molecule_id),)
+        highlighted_bond_orbit_ids = tuple(ring.bond_orbit_ids)
     elif mode is OrganicSceneMode.LINKER:
         precursor = _slot_result(document, "reticular_precursor")
         ligands = tuple(getattr(precursor, "ligand_orbits", ()))
@@ -172,23 +175,25 @@ def build_organic_scene(
             ),
             ligands[0] if selected_object_id is None and ligands else None,
         )
-        if selected_ligand is not None:
-            matching = tuple(
-                item
-                for item in molecules
-                if item.molecule_orbit_id
-                == selected_ligand.source_component_orbit_id
-            )
-            molecules = (
-                (min(matching, key=lambda item: item.molecule_id),)
-                if matching
-                else ()
-            )
-            highlighted_bond_orbit_ids = tuple(selected_ligand.bond_orbit_ids)
+        if selected_ligand is None:
+            return OrganicSceneData(mode, (), (), (), (), (), (), (), ())
+        resolved_object_id = selected_ligand.ligand_orbit_id
+        matching = tuple(
+            item
+            for item in molecules
+            if item.molecule_orbit_id == selected_ligand.source_component_orbit_id
+        )
+        molecules = (min(matching, key=lambda item: item.molecule_id),) if matching else ()
+        highlighted_bond_orbit_ids = tuple(selected_ligand.bond_orbit_ids)
     elif mode in {OrganicSceneMode.SBU, OrganicSceneMode.NET}:
         molecules = ()
     elif mode is OrganicSceneMode.SINGLE_MOLECULE and molecules:
-        molecules = (min(molecules, key=lambda item: item.molecule_id),)
+        matching = tuple(item for item in molecules if selected_object_id is None
+                         or selected_object_id in {item.molecule_id, item.molecule_orbit_id})
+        if not matching:
+            return OrganicSceneData(mode, (), (), (), (), (), (), (), ())
+        molecules = (min(matching, key=lambda item: item.molecule_id),)
+        resolved_object_id = molecules[0].molecule_orbit_id
 
     structure = document.structure
     atoms_by_id = {atom.id: atom for atom in structure.atomic_view().atoms}
@@ -249,6 +254,7 @@ def build_organic_scene(
             sbus[0] if selected_object_id is None and sbus else None,
         )
         if selected_sbu is not None and structure.space_group is not None:
+            resolved_object_id = selected_sbu.sbu_orbit_id
             context = SymmetryContext.from_definition(
                 structure.space_group,
                 structure.cell,
@@ -501,6 +507,7 @@ def build_organic_scene(
         tuple(net_node_records),
         tuple(net_edge_records),
         cell_edges,
+        resolved_object_id,
     )
 
 

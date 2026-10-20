@@ -8,7 +8,7 @@ import numpy as np
 
 from craft.adapters.cristma_contacts_presentation import ContactPresentation
 from craft.core.model import AtomSite, CrystalStructure
-from craft.core.site_orbits import site_orbit_key
+
 
 @dataclass(frozen=True, slots=True)
 class DisplayAtom:
@@ -198,61 +198,5 @@ def build_scene(
         translations=translations,
         fractional_translations=fractional_translations,
         repeat=repeat,
-        bounds=bounds,
-    )
-
-
-def build_asymmetric_scene(
-    structure: CrystalStructure,
-    *,
-    site_indices: tuple[int, ...] | None = None,
-    contact_presentation: ContactPresentation | None = None,
-) -> SceneData:
-    """Build the strict crystallographic asymmetric unit without symmetry copies."""
-    requested_keys = (
-        {
-            site_orbit_key(structure.sites[index].label)
-            for index in site_indices
-            if 0 <= index < len(structure.sites)
-        }
-        if site_indices is not None
-        else None
-    )
-    representatives: dict[str, int] = {}
-    for index, site in enumerate(structure.sites):
-        representatives.setdefault(site_orbit_key(site.label), index)
-
-    atoms: list[DisplayAtom] = []
-    for asymmetric in structure.asymmetric_sites:
-        key = site_orbit_key(asymmetric.label)
-        if requested_keys is not None and key not in requested_keys:
-            continue
-        index = representatives.get(key)
-        if index is None:
-            continue
-        site = structure.sites[index]
-        atoms.append(
-            DisplayAtom(
-                site_index=index,
-                site=site,
-                fractional=tuple(float(value) for value in site.fractional),
-                cartesian=tuple(
-                    float(value) for value in structure.cell.frac_to_cart(site.fractional)
-                ),
-            )
-        )
-
-    bounds = ((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))
-    corners, edges = _cell_geometry(structure, bounds)
-    return SceneData(
-        atoms=atoms,
-        bonds=_contact_bonds(atoms, contact_presentation)
-        if contact_presentation is not None
-        else [],
-        cell_corners=corners,
-        cell_edges=edges,
-        translations=((0.0, 0.0, 0.0),),
-        fractional_translations=((0, 0, 0),),
-        repeat=(1, 1, 1),
         bounds=bounds,
     )

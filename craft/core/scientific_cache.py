@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from enum import StrEnum
 from typing import Generic, Mapping, TypeVar
 
 
 T = TypeVar("T")
+
+INORGANIC_RESULT_SLOTS = (
+    "chemistry", "crystal_chemistry", "polyhedra", "inorganic_classification",
+    "units", "unit_graph", "representation", "connectivity", "blocks", "rings",
+)
+ORGANIC_RESULT_SLOTS = (
+    "molecular", "intermolecular", "pi_systems", "pi_stacking", "ch_pi",
+    "packing", "reticular_precursor", "sbu", "reticular_net",
+)
 
 
 def _freeze(value: object) -> object:
@@ -18,14 +26,6 @@ def _freeze(value: object) -> object:
     if isinstance(value, (set, frozenset)):
         return tuple(sorted((_freeze(item) for item in value), key=repr))
     return value
-
-
-class ScientificExecutionState(StrEnum):
-    PENDING = "pending"
-    RUNNING = "running"
-    READY = "ready"
-    FAILED = "failed"
-    STALE = "stale"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,16 +59,11 @@ class ScientificRequestKey:
 
 @dataclass(frozen=True, slots=True)
 class ScientificResultSlot(Generic[T]):
-    request_key: ScientificRequestKey
-    execution: ScientificExecutionState = ScientificExecutionState.PENDING
-    result: T | None = None
-    error_message: str | None = None
-    provenance: ScientificResultProvenance | None = None
+    """One installed result; execution progress belongs to request managers."""
 
-    @property
-    def value(self) -> T | None:
-        """Compatibility view while upper scientific layers are migrated."""
-        return self.result
+    request_key: ScientificRequestKey
+    result: T
+    provenance: ScientificResultProvenance | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,36 +100,31 @@ class ScientificResultProvenance:
 
 
 @dataclass(frozen=True, slots=True)
-class CachedScientificResult(Generic[T]):
-    value: T
-    provenance: ScientificResultProvenance
-
-
-@dataclass(frozen=True, slots=True)
 class ScientificResultSlots:
-    chemistry: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    crystal_chemistry: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    polyhedra: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    units: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    unit_graph: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    representation: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    connectivity: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    blocks: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    rings: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    molecular: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    intermolecular: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    pi_systems: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    pi_stacking: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    ch_pi: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    packing: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    reticular_precursor: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    sbu: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
-    reticular_net: CachedScientificResult[object] | ScientificResultSlot[object] | None = None
+    chemistry: ScientificResultSlot[object] | None = None
+    crystal_chemistry: ScientificResultSlot[object] | None = None
+    polyhedra: ScientificResultSlot[object] | None = None
+    inorganic_classification: ScientificResultSlot[object] | None = None
+    units: ScientificResultSlot[object] | None = None
+    unit_graph: ScientificResultSlot[object] | None = None
+    representation: ScientificResultSlot[object] | None = None
+    connectivity: ScientificResultSlot[object] | None = None
+    blocks: ScientificResultSlot[object] | None = None
+    rings: ScientificResultSlot[object] | None = None
+    molecular: ScientificResultSlot[object] | None = None
+    intermolecular: ScientificResultSlot[object] | None = None
+    pi_systems: ScientificResultSlot[object] | None = None
+    pi_stacking: ScientificResultSlot[object] | None = None
+    ch_pi: ScientificResultSlot[object] | None = None
+    packing: ScientificResultSlot[object] | None = None
+    reticular_precursor: ScientificResultSlot[object] | None = None
+    sbu: ScientificResultSlot[object] | None = None
+    reticular_net: ScientificResultSlot[object] | None = None
 
     def with_result(
         self,
         slot: str,
-        result: CachedScientificResult[object] | ScientificResultSlot[object],
+        result: ScientificResultSlot[object],
     ) -> ScientificResultSlots:
         if slot not in self.__dataclass_fields__:
             raise KeyError(f"unknown scientific result slot: {slot}")
@@ -143,10 +133,29 @@ class ScientificResultSlots:
     def invalidate_all(self) -> ScientificResultSlots:
         return ScientificResultSlots()
 
+    def diagnostics(self, names: tuple[str, ...]) -> tuple[object, ...]:
+        """Read native diagnostics only from the requested analysis branch."""
+        answer: list[object] = []
+        seen: set[tuple[str, str, str]] = set()
+        for name in names:
+            slot = getattr(self, name)
+            if slot is None:
+                continue
+            for diagnostic in getattr(slot.result, "diagnostics", ()):
+                key = (
+                    str(getattr(diagnostic, "code", "")),
+                    str(getattr(diagnostic, "message", diagnostic)),
+                    str(getattr(diagnostic, "severity", "")),
+                )
+                if key not in seen:
+                    seen.add(key)
+                    answer.append(diagnostic)
+        return tuple(answer)
+
 
 __all__ = [
-    "CachedScientificResult",
-    "ScientificExecutionState",
+    "INORGANIC_RESULT_SLOTS",
+    "ORGANIC_RESULT_SLOTS",
     "ScientificRequestKey",
     "ScientificResultSlot",
     "ScientificResultProvenance",

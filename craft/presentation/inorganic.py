@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from craft.analysis.inorganic_classification import CompoundClass
+
 
 Translation = tuple[int, int, int]
 AtomInstanceKey = tuple[str, Translation]
@@ -55,6 +57,12 @@ class PolyhedronOrbitView:
     coordination_number: int | None
     face_signature: object | None
     default_color: str
+    source_site_id: str = ""
+    source_shell_id: str = ""
+    ligand_site_counts: tuple[tuple[str, int], ...] = ()
+    geometry_label: str = ""
+    interaction_role: str = ""
+    coordination_boundary_key: str = ""
 
     def __post_init__(self) -> None:
         _require_id(self.polyhedron_orbit_id, "polyhedron_orbit_id")
@@ -114,6 +122,8 @@ class InorganicPresentation:
     topology_families: tuple[TopologyFamilyView, ...]
     diagnostics: tuple[object, ...]
     stage: str
+    compound_classes: tuple[CompoundClass, ...] = ()
+    cation_groups: tuple[CompoundClass, ...] = ()
 
     def __post_init__(self) -> None:
         _require_id(self.structure_id, "structure_id")

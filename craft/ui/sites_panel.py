@@ -2,15 +2,18 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QModelIndex, QPersistentModelIndex, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QColorDialog,
+    QComboBox,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -42,6 +45,7 @@ class SitesPanel(QWidget):
     state_changed = Signal()
     report_draft_changed = Signal(object)
     organic_object_activated = Signal(str, str)
+    scope_object_selected = Signal(str, object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -50,8 +54,38 @@ class SitesPanel(QWidget):
         self._color_mode = "automatic"
         self._comparison_locked = False
         self._category = "atoms"
+        self._scope_rows = ()
+        self._scope_source = None
+        self._scope_parent_key = None
+        self._scope_ancestor_keys = ()
+        self._scope_current = QPersistentModelIndex()
+        self._scope_history = []
+        self._scope_row_nodes = {}
+        self._scope_row_ancestors = {}
+        self._scope_tree = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        self.scope_navigation = QWidget()
+        navigation = QVBoxLayout(self.scope_navigation)
+        navigation.setContentsMargins(0, 0, 0, 0)
+        title_row = QHBoxLayout()
+        self.scope_back_button = QToolButton()
+        self.scope_back_button.setText("Back")
+        self.scope_back_button.setToolTip("Return to the previous object list")
+        self.scope_back_button.clicked.connect(self._scope_back)
+        self.scope_title = QLabel()
+        self.scope_title.setWordWrap(True)
+        title_row.addWidget(self.scope_back_button)
+        title_row.addWidget(self.scope_title, 1)
+        navigation.addLayout(title_row)
+        self.scope_context_combo = QComboBox()
+        self.scope_context_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.scope_context_combo.setMinimumContentsLength(12)
+        self.scope_context_combo.setToolTip("Choose the native connectivity criterion or coordination environments")
+        self.scope_context_combo.currentIndexChanged.connect(self._scope_context_changed)
+        navigation.addWidget(self.scope_context_combo)
+        self.scope_navigation.hide()
+        layout.addWidget(self.scope_navigation)
         self.topology_status = QLabel()
         self.topology_status.setWordWrap(True)
         self.topology_status.setTextInteractionFlags(
@@ -66,6 +100,10 @@ class SitesPanel(QWidget):
             ("Type", "Interaction", "Distance, Å", "Color", "Visible")
         )
         self.polyhedron_table = self._table(("Polyhedron", "Color", "Visible"))
+        self.scope_table = self._table(("Object", "Color", "Visible"))
+        self.scope_table.setToolTip("Double-click an object name to inspect its members; Back returns to the previous list.")
+        for column in (1, 2):
+            self.scope_table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         self.unit_table = self._table(("Structural block", "Color", "Visible"))
         self.ring_table = self._table(
             ("Ring", "Type", "Parent block", "Color", "Visible")
@@ -86,6 +124,7 @@ class SitesPanel(QWidget):
             "primary_contacts": self.contact_table,
             "secondary_contacts": self.contact_table,
             "polyhedra": self.polyhedron_table,
+            "hierarchy_scope": self.scope_table,
             "units": self.unit_table,
             "rings": self.ring_table,
             "interpretations": self.interpretation_table,
@@ -114,6 +153,10 @@ class SitesPanel(QWidget):
         self.contact_table.itemChanged.connect(self._contact_changed)
         self.contact_table.cellDoubleClicked.connect(self._contact_color_clicked)
         self.polyhedron_table.itemChanged.connect(self._polyhedron_changed)
+        self.scope_table.itemChanged.connect(self._scope_changed)
+        self.scope_table.cellDoubleClicked.connect(self._scope_color_clicked)
+        self.scope_table.cellDoubleClicked.connect(self._scope_open)
+        self.scope_table.cellClicked.connect(self._scope_select)
         self.unit_table.itemChanged.connect(self._unit_changed)
         self.ring_table.itemChanged.connect(self._ring_changed)
         self.block_table.itemChanged.connect(self._block_changed)
@@ -173,15 +216,21 @@ class SitesPanel(QWidget):
             if native and category in {"bonds", "contacts"}
             else self.tables.get(category)
         )
-        if table is not None:
-            self._category = category
-            if table is self.organic_table:
-                self._fill_organic_table(category)
-            elif table is self.contact_table:
-                self._fill_contacts(
-                    "primary_contacts" if native and category == "bonds" else category
-                )
-            self.stack.setCurrentWidget(table)
+        if table is None:
+            return
+        if category != "hierarchy_scope":
+            self._scope_rows = ()
+            self._scope_parent_key = None
+            self._scope_ancestor_keys = ()
+        self._category = category
+        self.scope_navigation.setVisible(category == "hierarchy_scope")
+        if table is self.organic_table:
+            self._fill_organic_table(category)
+        elif table is self.contact_table:
+            self._fill_contacts(
+                "primary_contacts" if native and category == "bonds" else category
+            )
+        self.stack.setCurrentWidget(table)
         self._update_topology_status_visibility()
 
     def current_table(self) -> QTableWidget:
@@ -204,11 +253,13 @@ class SitesPanel(QWidget):
             return False
         table = self.contact_table if native and category == "bonds" else self.tables[category]
         target = object_id
-        if kind == "bond" and isinstance(object_id, str) and not native:
-            presentation = getattr(self._document, "contact_presentation", None)
+        if kind == "bond" and isinstance(object_id, str):
+            presentation = (self._document.inorganic_presentation() if native
+                            else getattr(self._document, "contact_presentation", None))
+            rows = presentation.contact_orbits if native else getattr(presentation, "rows", ())
             row = next(
                 (
-                    item for item in getattr(presentation, "rows", ())
+                    item for item in rows
                     if item.contact_orbit_id == object_id
                 ),
                 None,
@@ -254,6 +305,20 @@ class SitesPanel(QWidget):
         return False
 
     def set_document(self, document) -> None:
+        source = (id(document.structure), id(getattr(document.scientific.inorganic_classification, "result", None))) if (
+            document is not None and hasattr(document.structure, "atomic_view")
+        ) else None
+        if document is not self._document or source != self._scope_source:
+            self._scope_rows = ()
+            self._scope_parent_key = None
+            self._scope_ancestor_keys = ()
+            self._scope_current = QPersistentModelIndex()
+            self._scope_history.clear()
+            self._scope_row_nodes.clear()
+            self._scope_row_ancestors.clear()
+            self.scope_navigation.hide()
+        self.scope_back_button.setEnabled(any(index.isValid() for index in self._scope_history))
+        self._scope_source = source
         self._document = document
         self._updating = True
         try:
@@ -263,6 +328,8 @@ class SitesPanel(QWidget):
                 return
             if hasattr(document.structure, "atomic_view"):
                 self._fill_native_inorganic_tables()
+                if self._category == "hierarchy_scope":
+                    self._fill_scope()
                 if self._category in {
                     "molecular_unit", "coordination_fragment", "molecular_rings",
                     "contacts", "nodes_sbus", "linkers",
@@ -297,6 +364,269 @@ class SitesPanel(QWidget):
             self._update_topology_status_visibility()
         finally:
             self._updating = False
+
+    def set_tree_scope(self, document, item, *, _navigating=False, _keep_context=False) -> None:
+        """List the drawable children of this branch, retaining their exact IDs."""
+        from craft.ui.hierarchy_tree import HierarchyTree
+        if document is not self._document:
+            self.set_document(document)
+        if not _navigating:
+            self._scope_history.clear()
+        tree = item.treeWidget()
+        if tree is not self._scope_tree:
+            if self._scope_tree is not None:
+                self._scope_tree.model().modelReset.disconnect(self._scope_model_reset)
+            self._scope_tree = tree
+            tree.model().modelReset.connect(self._scope_model_reset)
+        if not _navigating and item.data(0, HierarchyTree.TableDetailRole):
+            parent = item.parent()
+            while parent is not None and parent.data(0, HierarchyTree.TableDetailRole):
+                parent = parent.parent()
+            if parent is not None:
+                self._scope_history.append(QPersistentModelIndex(self._scope_tree.indexFromItem(parent)))
+        self._scope_current = QPersistentModelIndex(self._scope_tree.indexFromItem(item))
+        self._scope_row_nodes = {}
+        self._scope_row_ancestors = {}
+        supported = {"crystal_layer", "crystal_layer_group", "atom", "polyhedron", "block", "ring"}
+        entries = {}
+
+        def visit(child):
+            payload = child.data(0, Qt.ItemDataRole.UserRole)
+            if not payload or payload[0] != document.id:
+                return
+            _document_id, kind, identifier = payload
+            if kind in supported and not child.data(0, HierarchyTree.TableTransparentRole):
+                key = tuple(identifier) if kind == "crystal_layer_group" else str(identifier)
+                entries.setdefault((kind, key), child.text(0))
+                self._scope_row_nodes.setdefault((kind, key), QPersistentModelIndex(
+                    self._scope_tree.indexFromItem(child)))
+                self._scope_row_ancestors.setdefault((kind, key), HierarchyTree.layer_ancestors(child))
+                return
+            for index in range(child.childCount()):
+                visit(child.child(index))
+
+        payload = item.data(0, Qt.ItemDataRole.UserRole)
+        if payload and payload[1] == "crystal_layer_group":
+            visit(item)
+        else:
+            for index in range(item.childCount()):
+                child = item.child(index)
+                if child.data(0, HierarchyTree.ScopeVariantRole) is None:
+                    visit(child)
+        if not entries and payload and payload[1] in supported:
+            visit(item)
+        if not entries:
+            # Only explicit catalogue nodes may expose a complete dataset.
+            # An empty scientific branch must stay empty, even when its
+            # payload uses the same category as the global polyhedron table.
+            category = item.data(0, HierarchyTree.TableCategoryRole)
+            if category is not None:
+                self.set_category(str(category))
+                return
+        self._scope_rows = tuple((kind, identifier, label)
+                                 for (kind, identifier), label in entries.items())
+        self._scope_parent_key = str(payload[2]) if payload and payload[1] == "crystal_layer" else None
+        self._scope_ancestor_keys = ((self._scope_parent_key,) if self._scope_parent_key else ()) + HierarchyTree.layer_ancestors(item)
+        self._category = "hierarchy_scope"
+        self._fill_scope()
+        self.stack.setCurrentWidget(self.scope_table)
+        self.scope_title.setText(item.text(0))
+        self.scope_title.setToolTip(item.toolTip(0))
+        self.scope_back_button.setEnabled(any(index.isValid() for index in self._scope_history))
+        if not _keep_context:
+            self.scope_context_combo.blockSignals(True)
+            self.scope_context_combo.clear()
+            context_source = item.parent() if item.data(0, HierarchyTree.ScopeVariantRole) else item
+            default_label = context_source.data(0, HierarchyTree.DefaultScopeLabelRole)
+            if default_label:
+                self.scope_context_combo.addItem(str(default_label), QPersistentModelIndex(
+                    self._scope_tree.indexFromItem(context_source)))
+                for index in range(context_source.childCount()):
+                    child = context_source.child(index)
+                    label = child.data(0, HierarchyTree.ScopeVariantRole)
+                    if label:
+                        self.scope_context_combo.addItem(str(label), QPersistentModelIndex(
+                            self._scope_tree.indexFromItem(child)))
+                for index in range(self.scope_context_combo.count()):
+                    if self.scope_context_combo.itemData(index) == self._scope_current:
+                        self.scope_context_combo.setCurrentIndex(index)
+                        break
+            self.scope_context_combo.setVisible(self.scope_context_combo.count() > 1)
+            self.scope_context_combo.blockSignals(False)
+        self.scope_navigation.show()
+        self._update_topology_status_visibility()
+
+    def _scope_item(self, index):
+        if not isinstance(index, QPersistentModelIndex) or not index.isValid() or self._scope_tree is None:
+            return None
+        return self._scope_tree.itemFromIndex(QModelIndex(index))
+
+    def _scope_model_reset(self):
+        self._scope_current = QPersistentModelIndex()
+        self._scope_history.clear()
+        self._scope_row_nodes.clear()
+        self._scope_row_ancestors.clear()
+        self._scope_rows = ()
+        self._scope_parent_key = None
+        self._scope_ancestor_keys = ()
+        self.scope_back_button.setEnabled(False)
+        self.scope_navigation.hide()
+        self._fill_scope()
+
+    def _scope_open(self, row, column):
+        if column != 0:
+            return
+        key = self._key(self.scope_table, row)
+        item = self._scope_item(self._scope_row_nodes.get(key, QPersistentModelIndex()))
+        if item is None or not item.childCount():
+            return
+        # A compact orbit row opens its image list, retaining exact image IDs.
+        if key[0] == "crystal_layer_group":
+            item = next((item.child(i) for i in range(item.childCount())
+                         if item.child(i).text(0).startswith("Images (")), item)
+        self._scope_history.append(self._scope_current)
+        self.set_tree_scope(self._document, item, _navigating=True)
+
+    def _scope_back(self):
+        while self._scope_history:
+            item = self._scope_item(self._scope_history.pop())
+            if item is not None:
+                self.set_tree_scope(self._document, item, _navigating=True)
+                return
+        self.scope_back_button.setEnabled(False)
+
+    def _scope_context_changed(self, index):
+        item = self._scope_item(self.scope_context_combo.itemData(index)) if index >= 0 else None
+        if item is not None:
+            self._scope_history.clear()
+            self.set_tree_scope(self._document, item, _navigating=True, _keep_context=True)
+
+    def _scope_select(self, row, column):
+        if column == 0 and self._document is not None:
+            self.scope_object_selected.emit(*self._key(self.scope_table, row))
+
+    def _scope_style(self, kind, identifier, *, layer_options=None):
+        from craft.presentation.layer_state import resolved_layer_style
+
+        visual = self._document.visual
+        view = self._document.inorganic_presentation()
+        ancestors = self._scope_row_ancestors.get((kind, identifier), self._scope_ancestor_keys)
+        if kind == "crystal_layer_group":
+            styles = [resolved_layer_style(self._document, key, ancestors,
+                                           options=layer_options) for key in identifier]
+            styles = [style for style in styles if style is not None]
+            if not styles:
+                return None
+            count = sum(style.visible for style in styles)
+            visible = (Qt.CheckState.Unchecked if count == 0 else Qt.CheckState.Checked
+                       if count == len(styles) else Qt.CheckState.PartiallyChecked)
+            return styles[0].color, visible
+        if kind == "crystal_layer":
+            style = resolved_layer_style(self._document, identifier, ancestors,
+                                         options=layer_options)
+            if style is None:
+                return None
+            return style.color, style.visible
+        if kind == "atom":
+            row = view.atom_orbit(identifier)
+            if row is None:
+                return None
+            return visual.atom_orbit_colors.get(identifier, row.default_color), identifier not in visual.hidden_atom_orbit_ids
+        if kind == "polyhedron":
+            row = next((row for row in view.polyhedron_orbits if row.polyhedron_orbit_id == identifier), None)
+            if row is None:
+                return None
+            return visual.polyhedron_orbit_colors.get(identifier, row.default_color), identifier not in visual.hidden_polyhedron_orbit_ids
+        if kind == "block":
+            return (visual.block_colors.get(identifier, _UNIT_COLORS[0]),
+                    identifier in visual.shown_block_ids and identifier not in visual.hidden_block_ids)
+        if kind == "ring":
+            row = next((row for row in view.rings if row.ring_orbit_id == identifier), None)
+            if row is not None:
+                return visual.ring_scope_colors.get(row.scope, "#1f78b4"), identifier in visual.shown_ring_ids
+        return None
+
+    def _fill_scope(self) -> None:
+        previous = self._updating
+        self._updating = True
+        try:
+            table = self.scope_table
+            table.setRowCount(0)
+            if self._document is None:
+                return
+            options = None
+            if any(kind in {"crystal_layer", "crystal_layer_group"} for kind, _identifier, _label in self._scope_rows):
+                from craft.presentation.crystal_layers import layer_options
+                options = {row.key: row for row in layer_options(self._document)}
+            for kind, identifier, label in self._scope_rows:
+                state = self._scope_style(kind, identifier, layer_options=options)
+                if state is None:
+                    continue
+                row = table.rowCount()
+                table.insertRow(row)
+                table.setItem(row, 0, self._name_item(label, (kind, identifier)))
+                table.item(row, 0).setToolTip(label)
+                table.setItem(row, 1, self._color_item(state[0], identifier))
+                check = self._check_item(state[1] is True)
+                if isinstance(state[1], Qt.CheckState):
+                    check.setCheckState(state[1])
+                table.setItem(row, 2, check)
+                for column in (0, 1):
+                    cell = table.item(row, column)
+                    cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if self._comparison_locked:
+                    for column in (1, 2):
+                        cell = table.item(row, column)
+                        cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+        finally:
+            self._updating = previous
+
+    def _scope_changed(self, item) -> None:
+        if self._updating or self._document is None or item.column() != 2 or self._comparison_locked:
+            return
+        kind, identifier = self._key(self.scope_table, item.row())
+        ancestors = self._scope_row_ancestors.get((kind, identifier), self._scope_ancestor_keys)
+        visible = item.checkState() == Qt.CheckState.Checked
+        visual = self._document.visual
+        if kind in {"crystal_layer", "crystal_layer_group"}:
+            from craft.presentation.layer_state import set_layer_visibility
+            keys = identifier if kind == "crystal_layer_group" else (identifier,)
+            for key in keys:
+                set_layer_visibility(self._document, key, visible, ancestors)
+        elif kind == "block":
+            from craft.presentation.block_state import set_block_visibility
+            set_block_visibility(visual, self._document.inorganic_presentation(), identifier, visible)
+        else:
+            attribute = {"atom": "hidden_atom_orbit_ids", "polyhedron": "hidden_polyhedron_orbit_ids",
+                         "block": "shown_block_ids", "ring": "shown_ring_ids"}[kind]
+            values = getattr(visual, attribute)
+            add = visible if kind in {"block", "ring"} else not visible
+            values.add(identifier) if add else values.discard(identifier)
+        self.state_changed.emit()
+
+    def _scope_color_clicked(self, row: int, column: int) -> None:
+        if column != 1 or self._document is None or self._comparison_locked:
+            return
+        kind, identifier = self._key(self.scope_table, row)
+        ancestors = self._scope_row_ancestors.get((kind, identifier), self._scope_ancestor_keys)
+        color = QColorDialog.getColor(self.scope_table.item(row, 1).foreground().color(), self, "Object color")
+        if not color.isValid():
+            return
+        visual = self._document.visual
+        if kind in {"crystal_layer", "crystal_layer_group"}:
+            from craft.presentation.layer_state import set_layer_color
+            keys = identifier if kind == "crystal_layer_group" else (identifier,)
+            for key in keys:
+                set_layer_color(self._document, key, color.name(), ancestors)
+        else:
+            attribute = {"atom": "atom_orbit_colors", "polyhedron": "polyhedron_orbit_colors",
+                         "block": "block_colors", "ring": "ring_scope_colors"}[kind]
+            if kind == "ring":
+                identifier = next(row.scope for row in self._document.inorganic_presentation().rings
+                                  if row.ring_orbit_id == identifier)
+            getattr(visual, attribute)[identifier] = color.name()
+        self._fill_scope()
+        self.state_changed.emit()
 
     def _fill_native_inorganic_tables(self) -> None:
         view = self._document.inorganic_presentation()
@@ -340,6 +670,7 @@ class SitesPanel(QWidget):
             self.unit_table.setItem(row, 1, self._color_item(color, block.block_id))
             self.unit_table.setItem(row, 2, self._check_item(
                 block.block_id in self._document.visual.shown_block_ids
+                and block.block_id not in self._document.visual.hidden_block_ids
             ))
         for row, ring in enumerate(view.rings):
             self.ring_table.insertRow(row)
@@ -573,6 +904,8 @@ class SitesPanel(QWidget):
 
     def set_comparison_locked(self, locked: bool) -> None:
         self._comparison_locked = bool(locked)
+        if self._category == "hierarchy_scope":
+            self._fill_scope()
         self._update_color_availability()
 
     def _update_color_availability(self) -> None:
@@ -640,33 +973,25 @@ class SitesPanel(QWidget):
             rows = self._document.inorganic_presentation().contact_orbits
             if category != "contacts":
                 rows = tuple(row for row in rows if row.classification == classification)
-            grouped: dict[str, list[object]] = {}
-            for contact in rows:
-                grouped.setdefault(contact.pair_label or contact.label, []).append(contact)
-            for index, (pair_label, contacts) in enumerate(grouped.items()):
+            for index, contact in enumerate(rows):
                 table.insertRow(index)
-                identifiers = tuple(contact.contact_orbit_id for contact in contacts)
-                table.setItem(index, 0, self._name_item(pair_label, identifiers))
-                layers = sorted({
-                    contact.interaction_layer.replace("_", " ")
-                    for contact in contacts
-                })
-                table.setItem(index, 1, QTableWidgetItem(", ".join(layers)))
-                distance_min = min(contact.distance_min for contact in contacts)
-                distance_max = max(contact.distance_max for contact in contacts)
+                identifier = contact.contact_orbit_id
+                name = self._name_item(contact.label, identifier)
+                name.setToolTip(f"{contact.pair_label}\nNative contact orbit: {identifier}\nInstances: {contact.instance_count}")
+                table.setItem(index, 0, name)
+                table.setItem(index, 1, QTableWidgetItem(contact.interaction_layer.replace("_", " ")))
+                distance_min = contact.distance_min
+                distance_max = contact.distance_max
                 distance = (
                     f"{distance_min:.3f}"
                     if abs(distance_max - distance_min) < 1e-9
                     else f"{distance_min:.3f}–{distance_max:.3f}"
                 )
                 table.setItem(index, 2, QTableWidgetItem(distance))
-                color = self._document.visual.contact_orbit_colors.get(identifiers[0], "#7f8791")
-                table.setItem(index, 3, self._color_item(color, identifiers))
+                color = self._document.visual.contact_orbit_colors.get(identifier, "#7f8791")
+                table.setItem(index, 3, self._color_item(color, identifier))
                 table.setItem(index, 4, self._check_item(
-                    all(
-                        identifier not in self._document.visual.hidden_contact_orbit_ids
-                        for identifier in identifiers
-                    )
+                    identifier not in self._document.visual.hidden_contact_orbit_ids
                 ))
             table.blockSignals(was_blocked)
             return
@@ -1008,22 +1333,9 @@ class SitesPanel(QWidget):
             return
         identifiers = self._key(self.unit_table, item.row())
         if hasattr(self._document.structure, "atomic_view"):
-            shown = self._document.visual.shown_block_ids
-            block = self._document.inorganic_presentation().block(str(identifiers))
-            if item.checkState() == Qt.CheckState.Checked:
-                shown.add(str(identifiers))
-                self._document.visual.block_auto_hidden_atom_ids[block.block_id] = (
-                    block.internal_atom_ids
-                )
-                self._document.visual.block_auto_hidden_polyhedron_orbit_ids[
-                    block.block_id
-                ] = frozenset(block.polyhedron_orbit_ids)
-            else:
-                shown.discard(str(identifiers))
-                self._document.visual.block_auto_hidden_atom_ids.pop(block.block_id, None)
-                self._document.visual.block_auto_hidden_polyhedron_orbit_ids.pop(
-                    block.block_id, None
-                )
+            from craft.presentation.block_state import set_block_visibility
+            set_block_visibility(self._document.visual, self._document.inorganic_presentation(), identifiers,
+                                 item.checkState() == Qt.CheckState.Checked)
             self.state_changed.emit()
             return
         visual = self._document.visual
