@@ -16,6 +16,9 @@ plans/
 tools/
 data/
 /*.md
+!README.md
+!docs/
+!docs/**
 .agents/
 .codex/
 .superpowers/
