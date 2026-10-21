@@ -2,7 +2,7 @@
 setlocal EnableExtensions
 set "APP_ROOT=%~dp0.."
 for %%I in ("%APP_ROOT%") do set "APP_ROOT=%%~fI"
-set "SCI_ROOT=%LOCALAPPDATA%\Sci"
+set "SCI_ROOT=%PROGRAMDATA%\Sci"
 set "ENV_ROOT=%SCI_ROOT%\env"
 set "BIN_ROOT=%SCI_ROOT%\bin"
 set "APP_DATA_ROOT=%SCI_ROOT%\apps\craft"
@@ -50,13 +50,13 @@ exit /b 0
 
 :find_python
 set "PYTHON_CMD="
-if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
-    "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" -c "import sys; raise SystemExit(0 if (3,11) <= sys.version_info[:2] < (3,13) else 1)" >nul 2>nul
-    if not errorlevel 1 set "PYTHON_CMD=""%LOCALAPPDATA%\Programs\Python\Python311\python.exe"""& exit /b 0
-)
 if exist "%ProgramFiles%\Python311\python.exe" (
     "%ProgramFiles%\Python311\python.exe" -c "import sys; raise SystemExit(0 if (3,11) <= sys.version_info[:2] < (3,13) else 1)" >nul 2>nul
     if not errorlevel 1 set "PYTHON_CMD=""%ProgramFiles%\Python311\python.exe"""& exit /b 0
+)
+if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
+    "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" -c "import sys; raise SystemExit(0 if (3,11) <= sys.version_info[:2] < (3,13) else 1)" >nul 2>nul
+    if not errorlevel 1 set "PYTHON_CMD=""%LOCALAPPDATA%\Programs\Python\Python311\python.exe"""& exit /b 0
 )
 py -3.11 -c "import sys" >nul 2>nul
 if not errorlevel 1 set "PYTHON_CMD=py -3.11"& exit /b 0
@@ -66,7 +66,7 @@ exit /b 1
 where winget >nul 2>nul
 if errorlevel 1 exit /b 1
 echo Installing Python 3.11 for the shared Sci runtime...
-winget install --id Python.Python.3.11 -e --source winget --accept-package-agreements --accept-source-agreements >>"%LOG_FILE%" 2>&1
+winget install --id Python.Python.3.11 -e --source winget --scope machine --accept-package-agreements --accept-source-agreements >>"%LOG_FILE%" 2>&1
 exit /b %ERRORLEVEL%
 
 :failed

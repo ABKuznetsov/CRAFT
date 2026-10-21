@@ -10,7 +10,9 @@
 
 ## Download
 
-**[Download `CRAFT_Windows_1.1.1_Setup.exe` →](https://github.com/ABKuznetsov/CRAFT/releases/download/v1.1.1/CRAFT_Windows_1.1.1_Setup.exe)**
+**[Download `CRAFT_Windows_1.1.2_Setup.exe` →](https://github.com/ABKuznetsov/CRAFT/releases/download/v1.1.2/CRAFT_Windows_1.1.2_Setup.exe)**
+
+Run the installer as administrator. CRAFT is installed in `C:\Program Files\XRD Craft` and uses the shared `C:\ProgramData\Sci` environment for the scientific applications.
 
 **[Open the interactive presentation and visual guide →](https://abkuznetsov.github.io/CRAFT/)**
 

@@ -1,7 +1,7 @@
 @echo off
 setlocal
 set "APP_ROOT=%~dp0"
-set "SCI_PYTHON=%LOCALAPPDATA%\Sci\env\Scripts\pythonw.exe"
+set "SCI_PYTHON=%PROGRAMDATA%\Sci\env\Scripts\pythonw.exe"
 set "CRISTMA_VERSION="
 for /f "tokens=1,* delims==" %%A in ('findstr /b /i "cristma==" "%APP_ROOT%toolkit\requirements-windows.txt"') do set "CRISTMA_VERSION=%%B"
 if not defined CRISTMA_VERSION (

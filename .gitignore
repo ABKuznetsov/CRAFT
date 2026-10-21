@@ -10,6 +10,9 @@ dist/
 
 # Development-only material is kept locally, not in the public application repo.
 tests/
+!tests/
+tests/*
+!tests/test_windows_install_layout.py
 examples/
 docs/
 plans/
@@ -23,6 +26,7 @@ data/
 .codex/
 .superpowers/
 *.log
+installer/output/
 
 # User and test structure data.
 *.cif
