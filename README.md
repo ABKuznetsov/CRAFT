@@ -7,9 +7,7 @@
 <p align="center">
   <a href="https://abkuznetsov.github.io/CRAFT/"><strong>Interactive tour</strong></a>
   ·
-  <a href="https://github.com/ABKuznetsov/CRAFT/releases/download/v1.1.1/CRAFT_Windows_1.1.1_Setup.exe"><strong>Download for Windows</strong></a>
-  ·
-  <a href="https://github.com/ABKuznetsov/CRAFT/releases/download/v1.1.1/CRAFT_macOS_1.1.1.pkg"><strong>Download for macOS</strong></a>
+  <a href="https://github.com/ABKuznetsov/CRAFT/releases/download/v1.1.1/CRAFT_Windows_1.1.1_Setup.exe"><strong>Download Windows EXE</strong></a>
 </p>
 
 <p align="center">
@@ -18,15 +16,6 @@
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey" alt="Windows and macOS">
   <img src="https://img.shields.io/badge/license-GPL--3.0-2f855a" alt="GPL-3.0">
 </p>
-
-## Direct downloads
-
-| File | Download |
-|---|---|
-| CRAFT 1.1.1 · Windows 10/11 | [`CRAFT_Windows_1.1.1_Setup.exe`](https://github.com/ABKuznetsov/CRAFT/releases/download/v1.1.1/CRAFT_Windows_1.1.1_Setup.exe) · [SHA-256](https://github.com/ABKuznetsov/CRAFT/releases/download/v1.1.1/CRAFT_Windows_1.1.1_Setup.exe.sha256) |
-| CRAFT 1.1.1 · macOS 13+ | [`CRAFT_macOS_1.1.1.pkg`](https://github.com/ABKuznetsov/CRAFT/releases/download/v1.1.1/CRAFT_macOS_1.1.1.pkg) · [SHA-256](https://github.com/ABKuznetsov/CRAFT/releases/download/v1.1.1/CRAFT_macOS_1.1.1.pkg.sha256) |
-| Interactive presentation · standalone HTML | [`CRAFT-interactive-tour.html`](https://github.com/ABKuznetsov/CRAFT/raw/refs/heads/main/docs/index.html) |
-| Editable presentation · SPICY SLIDES | [`CRAFT-interactive-tour.spicy`](https://github.com/ABKuznetsov/CRAFT/raw/refs/heads/main/docs/presentation/CRAFT-interactive-tour.spicy) |
 
 # CRAFT
 
@@ -76,17 +65,9 @@ The examples describe the current analysis pipeline and its diagnostics. CRAFT d
 
 ## Download
 
-### Windows 10/11
-
 [Download `CRAFT_Windows_1.1.1_Setup.exe`](https://github.com/ABKuznetsov/CRAFT/releases/download/v1.1.1/CRAFT_Windows_1.1.1_Setup.exe)
 
 The per-user installer creates or reuses the shared scientific Python environment under `%LocalAppData%\Sci`.
-
-### macOS 13+
-
-[Download `CRAFT_macOS_1.1.1.pkg`](https://github.com/ABKuznetsov/CRAFT/releases/download/v1.1.1/CRAFT_macOS_1.1.1.pkg)
-
-Both packages have matching SHA-256 files on the [CRAFT 1.1.1 release page](https://github.com/ABKuznetsov/CRAFT/releases/tag/v1.1.1).
 
 ## Run from source
 
