@@ -8,6 +8,10 @@
 
 [![Explore CRAFT: interactive presentation and visual guide](assets/craft-presentation.png)](https://abkuznetsov.github.io/CRAFT/)
 
+## Download
+
+**[Download `CRAFT_Windows_1.1.1_Setup.exe` →](https://github.com/ABKuznetsov/CRAFT/releases/download/v1.1.1/CRAFT_Windows_1.1.1_Setup.exe)**
+
 **[Open the interactive presentation and visual guide →](https://abkuznetsov.github.io/CRAFT/)**
 
 ## See more than atoms
@@ -46,10 +50,6 @@ CRAFT keeps calculated graph properties separate from crystal-chemical interpret
 | VASP | `.vasp`, `POSCAR`, `CONTCAR` | Load periodic structures from VASP calculations. |
 | Protein Data Bank | `.pdb` | Load molecular and crystallographic coordinate models. |
 | XYZ | `.xyz` | Load Cartesian atomic coordinates. |
-
-## Download
-
-[Windows installer: `CRAFT_Windows_1.1.1_Setup.exe`](https://github.com/ABKuznetsov/CRAFT/releases/download/v1.1.1/CRAFT_Windows_1.1.1_Setup.exe)
 
 ## Run from source
 
